@@ -1,0 +1,1600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phoenix Packages</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d0d0f;
+  --bg-card: rgba(255,255,255,0.03);
+  --bg-hover: rgba(255,255,255,0.05);
+  --border: rgba(255,255,255,0.06);
+  --text: #e4e4e7;
+  --text-dim: #71717a;
+  --text-muted: #3f3f46;
+  --green: #34d399;
+  --yellow: #fbbf24;
+  --red: #f87171;
+  --violet: #a78bfa;
+  --blue: #60a5fa;
+  --amber: #fb923c;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 12px;
+  line-height: 1.5;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.toolbar-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex: 1;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  white-space: nowrap;
+}
+button:hover { background: var(--bg-hover); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.primary {
+  background: rgba(167,139,250,0.15);
+  border-color: rgba(167,139,250,0.3);
+  color: var(--violet);
+}
+button.primary:hover { background: rgba(167,139,250,0.22); }
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+.empty, .loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.progress-line {
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  max-width: 340px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-height: 14px;
+}
+
+.spinner {
+  width: 16px; height: 16px;
+  border: 1.5px solid rgba(255,255,255,0.1);
+  border-top-color: var(--text-dim);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-box {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(248,113,113,0.08);
+  border: 1px solid rgba(248,113,113,0.2);
+  color: var(--red);
+  font-size: 11px;
+  white-space: pre-wrap;
+  font-family: monospace;
+  margin-bottom: 12px;
+}
+
+.stats {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.stat {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+}
+.badge-ok      { background: rgba(52,211,153,0.12);  color: var(--green);  }
+.badge-minor   { background: rgba(96,165,250,0.12);  color: var(--blue);   }
+.badge-major   { background: rgba(251,191,36,0.12);  color: var(--yellow); }
+.badge-patch   { background: rgba(167,139,250,0.12); color: var(--violet); }
+.badge-blocked { background: rgba(251,146,60,0.12);  color: var(--amber);  }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 8px 8px;
+  border-bottom: 1px solid var(--border);
+}
+th:last-child { text-align: right; }
+
+tr.dep-row { transition: background 0.08s; }
+tr.dep-row:hover td { background: var(--bg-hover); }
+
+td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  vertical-align: middle;
+}
+
+.dep-name {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+.dep-name .dep-env {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.ver { font-family: monospace; font-size: 11px; }
+.ver-current { color: var(--text-dim); }
+.ver-same { color: var(--text-muted); }
+.ver-prefix { opacity: 0.4; }
+.ver-changed-major { color: var(--yellow); font-weight: 600; }
+.ver-changed-minor { color: var(--blue);   font-weight: 600; }
+.ver-changed-patch { color: var(--violet); font-weight: 600; }
+
+/* Constraint column */
+.constraint-tag {
+  font-family: monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.constraint-tag.updatable {
+  color: var(--text-dim);
+  border-color: rgba(255,255,255,0.06);
+}
+.constraint-tag.blocked {
+  color: var(--amber);
+  background: rgba(251,146,60,0.08);
+  border-color: rgba(251,146,60,0.2);
+}
+.constraint-tag.satisfied {
+  color: var(--text-muted);
+}
+
+.action-col { text-align: right; white-space: nowrap; }
+
+button.update-btn {
+  padding: 3px 8px;
+  font-size: 10px;
+  border-color: rgba(96,165,250,0.3);
+  background: rgba(96,165,250,0.08);
+  color: var(--blue);
+}
+button.update-btn:hover { background: rgba(96,165,250,0.15); }
+
+button.bump-btn {
+  padding: 3px 8px;
+  font-size: 10px;
+  border-color: rgba(251,146,60,0.3);
+  background: rgba(251,146,60,0.08);
+  color: var(--amber);
+}
+button.bump-btn:hover { background: rgba(251,146,60,0.15); }
+
+button.info-btn {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+.dep-link {
+  color: var(--text);
+  text-decoration: none;
+}
+.dep-link:hover { color: var(--blue); text-decoration: underline; }
+
+.review-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.review-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.review-title {
+  font-family: monospace;
+  font-size: 13px;
+  color: var(--text);
+}
+.review-meta {
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.review-links {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.review-links button {
+  font-size: 10px;
+  padding: 3px 8px;
+}
+.review-warning {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(251,191,36,0.2);
+  background: rgba(251,191,36,0.08);
+  color: var(--yellow);
+  font-size: 11px;
+}
+.review-note {
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.diagnostic-box {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  background: rgba(0,0,0,0.24);
+  border: 1px solid rgba(255,255,255,0.06);
+  color: var(--text-dim);
+  font-family: monospace;
+  font-size: 10px;
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow: auto;
+}
+/* Diff viewer — GitHub-style sidebar + content */
+.diff-viewer {
+  margin-top: 10px;
+  height: 520px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  background: #0d1117;
+  width: 100%;
+  flex: 0 0 100%;
+  box-sizing: border-box;
+}
+.diff-sidebar {
+  width: 200px;
+  min-width: 200px;
+  border-right: 1px solid rgba(255,255,255,0.06);
+  overflow-y: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.diff-sidebar-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 10px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.diff-sidebar-toggle {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.diff-file-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.diff-file-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.08s;
+}
+.diff-file-item:hover {
+  background: rgba(255,255,255,0.04);
+}
+.diff-file-item.active {
+  background: rgba(88,166,255,0.1);
+  border-left: 2px solid #58a6ff;
+}
+.diff-file-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.diff-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-family: 'SF Mono', monospace;
+  font-size: 10px;
+}
+.diff-file-stats {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 9px;
+  font-family: monospace;
+}
+.diff-file-stats .add { color: var(--green); }
+.diff-file-stats .del { color: var(--red); }
+
+.diff-content {
+  flex: 1;
+  overflow: auto;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 12px;
+  overscroll-behavior: contain;
+}
+.diff-content pre {
+  margin: 0;
+  padding: 0;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-all;
+  tab-size: 2;
+}
+.diff-content .diff-file-header {
+  color: #58a6ff;
+  font-weight: 600;
+  margin-top: 16px;
+  margin-bottom: 8px;
+  padding-top: 8px;
+  padding-left: 4px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  scroll-margin-top: 8px;
+}
+.diff-content .diff-file-header:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.diff-content .diff-add {
+  color: #3fb950;
+  background: rgba(63,185,80,0.08);
+}
+.diff-content .diff-remove {
+  color: #f85149;
+  background: rgba(248,81,73,0.08);
+}
+.diff-content .diff-hunk {
+  color: #8b949e;
+}
+.diff-content .diff-context {
+  color: #8b949e;
+}
+.diff-sidebar.collapsed {
+  display: none;
+}
+
+/* Shimmer loading */
+.shimmer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+}
+.shimmer-line {
+  height: 12px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.03) 25%, rgba(255,255,255,0.08) 50%, rgba(255,255,255,0.03) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+.shimmer-line:nth-child(1) { width: 60%; }
+.shimmer-line:nth-child(2) { width: 80%; }
+.shimmer-line:nth-child(3) { width: 45%; }
+.shimmer-line:nth-child(4) { width: 70%; }
+.shimmer-line:nth-child(5) { width: 55%; }
+.shimmer-line:nth-child(6) { width: 90%; }
+.shimmer-line:nth-child(7) { width: 40%; }
+.shimmer-line:nth-child(8) { width: 75%; }
+.shimmer-line:nth-child(9) { width: 50%; }
+.shimmer-line:nth-child(10) { width: 65%; }
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.updating-indicator {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--text-dim);
+}
+.mini-spinner {
+  width: 10px; height: 10px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-top-color: var(--text-dim);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <span class="toolbar-title">Mix Dependencies</span>
+  <button id="btn-update-all" class="primary" style="display:none">
+    Update all outdated
+  </button>
+  <button id="btn-toggle-all">Show all</button>
+  <button id="btn-refresh">
+    <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+      <path d="M9.5 5.5A4 4 0 1 1 5.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+      <path d="M9.5 1.5v4h-4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Refresh
+  </button>
+</div>
+
+<div class="content" id="content">
+  <div class="loading-state">
+    <div class="spinner"></div>
+    <span>Checking dependencies…</span>
+  </div>
+</div>
+
+<script>
+const bridge = window.__portaBridge;
+
+let deps = [];
+let loading = false;
+let showAll = false;
+let mixConstraints = {}; // { depName: "~> x.y" }
+let selectedReview = null;
+const reviewedDeps = new Set();
+const packageInfoCache = {};
+
+function setTitle(n) {
+  bridge.ui.setTitle(n > 0 ? `Packages (${n} outdated)` : 'Phoenix Packages');
+}
+
+function setContent(html) {
+  document.getElementById('content').innerHTML = html;
+}
+
+async function runStream(cmd, onLine, timeoutMs = 120000) {
+  return bridge.shell.spawn(
+    cmd,
+    { cwd: bridge.app.rootDir, timeout: timeoutMs },
+    { onStdout: (l) => onLine && onLine(l), onStderr: (l) => onLine && onLine(l) }
+  );
+}
+
+async function runWithProgress(cmd, label, timeoutMs = 300000) {
+  loading = true;
+  document.getElementById('btn-update-all').style.display = 'none';
+  setContent(`
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <span>${label}</span>
+      <div class="progress-line" id="prog"></div>
+    </div>
+  `);
+  try {
+    const result = await runStream(cmd, (line) => {
+      const el = document.getElementById('prog');
+      if (el && line.trim()) el.textContent = line.trim();
+    }, timeoutMs);
+    return result;
+  } finally {
+    loading = false;
+  }
+}
+
+// ── Parsers ───────────────────────────────────────────────────────────────────
+
+// Handles new hex format (5 cols: Dependency | Only | Current | Latest | Status)
+// and old hex format (4 cols: Dependency | Current | Latest | update text).
+function parseMixOutdated(stdout) {
+  const lines = stdout.split('\n');
+  const results = [];
+  let started = false;
+  for (const line of lines) {
+    if (line.includes('Dependency') && line.includes('Current') && line.includes('Latest')) {
+      started = true;
+      continue;
+    }
+    if (!started) continue;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('*')) continue;
+
+    const cols = trimmed.split(/\s{2,}/);
+    if (cols.length < 3) continue;
+
+    let name, env, current, latest, status;
+    if (cols.length >= 5) {
+      [name, env, current, latest, status] = cols;
+    } else if (cols.length === 4) {
+      [name, current, latest, status] = cols;
+      env = null;
+    } else {
+      [name, current, latest] = cols;
+      env = null;
+      status = '';
+    }
+
+    if (!/^\d+\.\d+/.test(current) || !/^\d+\.\d+/.test(latest)) continue;
+
+    const statusStr = (status || '').trim();
+    const isNewFormat = statusStr === 'Update possible' || statusStr === 'Update not possible' || statusStr === 'Up-to-date';
+    const outdated = current !== latest && (
+      isNewFormat ? statusStr === 'Update possible' : !!statusStr
+    );
+
+    results.push({ name, env: env || null, current, latest, outdated });
+  }
+  // Deduplicate by name (keep last occurrence)
+  const seen = new Map();
+  for (const r of results) seen.set(r.name, r);
+  return Array.from(seen.values());
+}
+
+// Extract {:dep_name, "~> constraint"} entries from mix.exs content.
+function parseMixExsConstraints(content) {
+  const constraints = {};
+  // Match {:name, "constraint"} — only version-style constraints (starts with ~> >= == > < ^)
+  const re = /\{:(\w+),\s*"([~><=^][^"]+)"/g;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    constraints[m[1]] = m[2];
+  }
+  return constraints;
+}
+
+// Suggest the tightest safe constraint that allows the latest version.
+// e.g. latest "0.2.0" → "~> 0.2", latest "4.1.0" → "~> 4.1"
+function suggestedConstraint(latest, currentConstraint) {
+  const parts = latest.split('.');
+  const suggested = `~> ${parts[0]}.${parts[1] || '0'}`;
+  if (currentConstraint && constraintAllowsVersion(currentConstraint, latest) === true) {
+    return null;
+  }
+  return suggested;
+}
+
+function parseVersionParts(v) {
+  return String(v || '').split(/[.-]/).slice(0, 3).map(n => Number.parseInt(n, 10) || 0);
+}
+
+function compareVersions(a, b) {
+  const av = parseVersionParts(a);
+  const bv = parseVersionParts(b);
+  for (let i = 0; i < 3; i++) {
+    if (av[i] !== bv[i]) return av[i] < bv[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+function pessimisticUpperBound(raw) {
+  const nums = String(raw || '').match(/\d+/g);
+  if (!nums || nums.length < 2) return null;
+  const major = Number(nums[0]);
+  const minor = Number(nums[1]);
+  const patch = nums.length >= 3 ? Number(nums[2]) : null;
+  if (patch === null) return `${major + 1}.0.0`;
+  return `${major}.${minor + 1}.0`;
+}
+
+function constraintAllowsVersion(constraint, version) {
+  if (!constraint) return null;
+  const c = constraint.trim();
+  const pess = c.match(/^~>\s*([0-9][0-9A-Za-z.\-]*)/);
+  if (pess) {
+    const lower = pess[1];
+    const upper = pessimisticUpperBound(lower);
+    return compareVersions(version, lower) >= 0 && (!upper || compareVersions(version, upper) < 0);
+  }
+  const exact = c.match(/^(?:==\s*)?([0-9][0-9A-Za-z.\-]*)$/);
+  if (exact) return compareVersions(version, exact[1]) === 0;
+  return null;
+}
+
+// Full requirement checker — handles "x or y", "x and y", and ~> >= <= > < ==.
+// Returns true/false; unparseable atoms are treated as satisfied (never a false blocker).
+function versionSatisfies(req, version) {
+  if (!req) return true;
+  return String(req).split(/\s+or\s+/).some(alt =>
+    alt.trim().split(/\s+and\s+/).every(atom => atomSatisfies(atom.trim(), version) !== false)
+  );
+}
+
+function atomSatisfies(atom, version) {
+  const m = atom.match(/^(~>|>=|<=|==|>|<)?\s*([0-9][0-9A-Za-z.\-]*)$/);
+  if (!m) return null; // unknown → don't flag
+  const op = m[1] || '==';
+  const cmp = compareVersions(version, m[2]);
+  switch (op) {
+    case '~>': {
+      const upper = pessimisticUpperBound(m[2]);
+      return cmp >= 0 && (!upper || compareVersions(version, upper) < 0);
+    }
+    case '>=': return cmp >= 0;
+    case '<=': return cmp <= 0;
+    case '>':  return cmp > 0;
+    case '<':  return cmp < 0;
+    case '==': return cmp === 0;
+  }
+  return null;
+}
+
+// Lowest version a requirement could be satisfied by — used to probe whether
+// another dep's constraint overlaps with what the target release needs.
+function requirementFloor(req) {
+  const lits = String(req || '').match(/[0-9][0-9A-Za-z.\-]*/g) || [];
+  if (!lits.length) return null;
+  return lits.reduce((min, v) => compareVersions(v, min) < 0 ? v : min);
+}
+
+// Parse mix.lock into { name: { version, reqs: [{dep, req, optional}] } }.
+// Each lock entry is one line: "name": {:hex, :name, "ver", "hash", [:mix], [ {:dep, "req", [hex: ..., optional: bool]}, ... ], ...}
+function parseMixLock(content) {
+  const lock = {};
+  for (const line of String(content || '').split('\n')) {
+    const head = line.match(/^\s*"([^"]+)":\s*\{:hex,\s*:\w+,\s*"([^"]+)"/);
+    if (!head) continue;
+    const reqs = [];
+    const reqRe = /\{:(\w+),\s*"([^"]*)",\s*\[hex:[^\]]*?optional:\s*(true|false)/g;
+    let m;
+    while ((m = reqRe.exec(line)) !== null) {
+      reqs.push({ dep: m[1], req: m[2], optional: m[3] === 'true' });
+    }
+    lock[head[1]] = { version: head[2], reqs };
+  }
+  return lock;
+}
+
+// ── Version rendering ─────────────────────────────────────────────────────────
+
+function updateType(current, latest) {
+  if (current === latest) return 'ok';
+  const c = current.split('.').map(Number);
+  const l = latest.split('.').map(Number);
+  if ((l[0] || 0) > (c[0] || 0)) return 'major';
+  if ((l[1] || 0) > (c[1] || 0)) return 'minor';
+  return 'patch';
+}
+
+function renderLatestVer(current, latest, type) {
+  if (current === latest) return `<span class="ver ver-same">${latest}</span>`;
+  const c = current.split('.');
+  const l = latest.split('.');
+  let diffIdx = 0;
+  for (let i = 0; i < Math.max(c.length, l.length); i++) {
+    if ((c[i] || '0') !== (l[i] || '0')) { diffIdx = i; break; }
+  }
+  const prefix = l.slice(0, diffIdx).join('.');
+  const changed = l.slice(diffIdx).join('.');
+  const cls = `ver-changed-${type}`;
+  if (prefix) {
+    return `<span class="ver"><span class="ver-prefix">${prefix}.</span><span class="${cls}">${changed}</span></span>`;
+  }
+  return `<span class="ver ${cls}">${changed}</span>`;
+}
+
+function renderBadge(type) {
+  const labels = { ok: 'up to date', minor: 'minor', major: 'major', patch: 'patch' };
+  return `<span class="badge badge-${type}">${labels[type]}</span>`;
+}
+
+function renderConstraint(dep) {
+  const c = dep.constraint;
+  if (!c) return '<span class="constraint-tag satisfied">—</span>';
+  if (dep.outdated) {
+    // Can update within this constraint
+    return `<span class="constraint-tag updatable" title="Updatable within this constraint">${c}</span>`;
+  }
+  if (dep.current !== dep.latest) {
+    const allowsLatest = constraintAllowsVersion(c, dep.latest);
+    const title = allowsLatest === true
+      ? `Direct constraint allows ${dep.latest}; another dependency or solver constraint may block it`
+      : `Constraint may prevent updating to ${dep.latest}`;
+    return `<span class="constraint-tag blocked" title="${htmlEscape(title)}">${c}</span>`;
+  }
+  // Up to date
+  return `<span class="constraint-tag satisfied">${c}</span>`;
+}
+
+function shellQuote(s) {
+  return "'" + String(s).replaceAll("'", "'\\''") + "'";
+}
+
+function htmlEscape(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function hexPackageUrl(name) {
+  return `https://hex.pm/packages/${encodeURIComponent(name)}`;
+}
+
+function hexReleaseUrl(name, version) {
+  return `https://hex.pm/packages/${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
+}
+
+function hexDiffUrl(name, current, latest) {
+  return `https://diff.hex.pm/diff/${encodeURIComponent(name)}/${encodeURIComponent(current)}..${encodeURIComponent(latest)}`;
+}
+
+async function openUrl(url) {
+  const result = await bridge.shell.run(`open ${shellQuote(url)}`, { timeout: 5000 });
+  if (result.code !== 0) {
+    bridge.ui.toast(`Failed to open URL: ${(result.stderr || result.stdout || '').slice(0, 80)}`, 'error');
+  }
+}
+
+async function getPackageInfo(name) {
+  if (packageInfoCache[name]) return packageInfoCache[name];
+  const url = `https://hex.pm/api/packages/${encodeURIComponent(name)}`;
+  const result = await bridge.shell.run(`curl -fsSL ${shellQuote(url)}`, { timeout: 15000 });
+  if (result.code !== 0) {
+    throw new Error((result.stderr || result.stdout || 'Hex API request failed').trim());
+  }
+  const parsed = JSON.parse(result.stdout);
+  packageInfoCache[name] = parsed;
+  return parsed;
+}
+
+const releaseReqCache = {};
+// Fetch a specific release's dependency requirements from the Hex API.
+// Returns { depName: { requirement, optional } }.
+async function getReleaseRequirements(name, version) {
+  const key = `${name}@${version}`;
+  if (releaseReqCache[key]) return releaseReqCache[key];
+  const url = `https://hex.pm/api/packages/${encodeURIComponent(name)}/releases/${encodeURIComponent(version)}`;
+  const result = await bridge.shell.run(`curl -fsSL ${shellQuote(url)}`, { timeout: 15000 });
+  if (result.code !== 0) {
+    throw new Error((result.stderr || result.stdout || 'Hex release request failed').trim());
+  }
+  const reqs = JSON.parse(result.stdout).requirements || {};
+  releaseReqCache[key] = reqs;
+  return reqs;
+}
+
+function buildPackageLinks(dep, info) {
+  const links = [];
+  if (dep.current !== dep.latest) {
+    links.push(['Diff', hexDiffUrl(dep.name, dep.current, dep.latest)]);
+  }
+  links.push(['Hex.pm', hexPackageUrl(dep.name)]);
+  links.push(['Latest release', hexReleaseUrl(dep.name, dep.latest)]);
+  if (info?.docs_html_url) links.push(['Docs', info.docs_html_url]);
+  const metaLinks = info?.meta?.links || {};
+  const sortedMetaLinks = Object.entries(metaLinks).sort(([a], [b]) => {
+    const rank = label => /change|release/i.test(label) ? 0 : /source|github|repo/i.test(label) ? 1 : 2;
+    return rank(a) - rank(b);
+  });
+  for (const [label, url] of sortedMetaLinks) {
+    if (!url || links.some(([, existing]) => existing === url)) continue;
+    links.push([label, url]);
+  }
+  return links;
+}
+
+async function showPackageReview(name) {
+  const dep = deps.find(d => d.name === name);
+  if (!dep) return;
+  selectedReview = { dep, loading: true, error: null, info: null, diagnostics: null, showDiff: false, diffHtml: null };
+  reviewedDeps.add(name);
+  render();
+  try {
+    const info = await getPackageInfo(name);
+    selectedReview = { dep, loading: false, error: null, info, diagnostics: null, showDiff: false, diffHtml: null };
+  } catch (e) {
+    selectedReview = { dep, loading: false, error: String(e), info: null, diagnostics: null, showDiff: false, diffHtml: null };
+  }
+  render();
+}
+
+// Analyze WHY a dep can't reach its latest version, using the target release's
+// requirements (Hex API) cross-referenced against the locked sub-dep versions.
+// Returns { blockers: [{ sub, need, locked, pinnedBy: [{pkg, req}] }] }.
+async function diagnoseConflict(name, latest) {
+  const targetReqs = await getReleaseRequirements(name, latest);
+  const lockResult = await bridge.shell.run('cat mix.lock', { timeout: 5000 });
+  const lock = parseMixLock(lockResult.stdout || '');
+
+  const blockers = [];
+  for (const [sub, info] of Object.entries(targetReqs)) {
+    if (info.optional || sub === name) continue;
+    const locked = lock[sub];
+    if (!locked) continue; // not installed yet — resolver can pull it fresh
+    if (versionSatisfies(info.requirement, locked.version)) continue;
+    // This sub-dep must move but is held back; find every installed pkg that
+    // pins it below the version the target needs.
+    const floor = requirementFloor(info.requirement);
+    const pinnedBy = [];
+    for (const [pkg, pinfo] of Object.entries(lock)) {
+      if (pkg === name) continue;
+      for (const r of pinfo.reqs) {
+        if (r.dep === sub && floor && versionSatisfies(r.req, floor) === false) {
+          pinnedBy.push({ pkg, req: r.req, pkgVersion: pinfo.version });
+        }
+      }
+    }
+    blockers.push({ sub, need: info.requirement, locked: locked.version, pinnedBy });
+  }
+  return { blockers };
+}
+
+// Would updating a pinning package to its latest release relax the constraint?
+// Returns { latest, currentReq, latestReq, fixable }.
+async function isBlockerFixable(pkg, currentReq, sub, need) {
+  const floor = requirementFloor(need);
+  try {
+    const info = await getPackageInfo(pkg);
+    const latest = info.latest_stable_version || info.latest_version || (info.releases || [])[0]?.version;
+    if (!latest) return { latest: null, currentReq, latestReq: null, fixable: null };
+    const reqs = await getReleaseRequirements(pkg, latest);
+    const latestReq = reqs[sub]?.requirement || null;
+    const fixable = latestReq != null && floor != null && versionSatisfies(latestReq, floor) === true;
+    return { latest, currentReq, latestReq, fixable };
+  } catch (_) {
+    return { latest: null, currentReq, latestReq: null, fixable: null };
+  }
+}
+
+async function showConflictDiagnostics(name, reason) {
+  const dep = deps.find(d => d.name === name);
+  if (!dep) return;
+  reviewedDeps.add(name);
+  selectedReview = { dep, loading: true, error: null, info: null, diagnostics: reason || null, conflict: null, showDiff: false, diffHtml: null };
+  render();
+  try {
+    const conflict = await diagnoseConflict(name, dep.latest);
+    // Enrich each pinning pkg with whether its latest release would unblock.
+    for (const b of conflict.blockers) {
+      for (const p of b.pinnedBy) {
+        Object.assign(p, await isBlockerFixable(p.pkg, p.req, b.sub, b.need));
+      }
+    }
+    const info = await getPackageInfo(name).catch(() => null);
+    selectedReview = { ...selectedReview, loading: false, info, conflict };
+  } catch (e) {
+    selectedReview = { ...selectedReview, loading: false, error: String(e) };
+  }
+  render();
+}
+
+function stripTempPath(fullPath) {
+  // Path format: var/folders/XX/XXXXXX/T/pkg-ver-HASH/lib/foo.ex
+  // or: /tmp/pkg-ver-HASH/lib/foo.ex
+  const tIdx = fullPath.indexOf('/T/');
+  const tmpIdx = fullPath.indexOf('/tmp/');
+  let afterMarker;
+  if (tIdx !== -1) afterMarker = fullPath.substring(tIdx + 3);
+  else if (tmpIdx !== -1) afterMarker = fullPath.substring(tmpIdx + 5);
+  else return fullPath.split('/').pop();
+  const slashIdx = afterMarker.indexOf('/');
+  return slashIdx !== -1 ? afterMarker.substring(slashIdx + 1) : afterMarker;
+}
+
+async function toggleDiffPreview() {
+  if (!selectedReview) return;
+  if (selectedReview.showDiff) {
+    selectedReview = { ...selectedReview, showDiff: false, diffHtml: null };
+    render();
+    return;
+  }
+  const dep = selectedReview.dep;
+  selectedReview = { ...selectedReview, showDiff: true, diffHtml: null };
+  render();
+  try {
+    const result = await bridge.shell.run(
+      `mix hex.package diff ${shellQuote(dep.name)} ${shellQuote(dep.current + '..' + dep.latest)}`,
+      { timeout: 120000 }
+    );
+    const raw = (result.stdout || '') + (result.stderr || '');
+    if (!raw.trim()) {
+      selectedReview = { ...selectedReview, diffHtml: '<div style="padding:12px;color:var(--text-muted);font-size:11px">No diff output.</div>' };
+    } else {
+      selectedReview = { ...selectedReview, diffHtml: renderDiff(raw) };
+    }
+  } catch (e) {
+    selectedReview = { ...selectedReview, diffHtml: `<div class="error-box">Failed to generate diff:\n${htmlEscape(String(e))}</div>` };
+  }
+  render();
+}
+
+function renderDiff(raw) {
+  const lines = raw.split('\n');
+
+  // Parse into files
+  const files = [];
+  let currentFile = null;
+  let fileAdds = 0, fileDels = 0;
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git')) {
+      if (currentFile) {
+        currentFile.adds = fileAdds;
+        currentFile.dels = fileDels;
+        files.push(currentFile);
+      }
+      const parts = line.split(' ');
+      const bPath = parts[3] || '';
+      const fullPath = bPath.replace(/^b\//, '');
+      const cleanName = stripTempPath(fullPath);
+      currentFile = { name: cleanName, lines: [], adds: 0, dels: 0 };
+      fileAdds = 0;
+      fileDels = 0;
+    } else if (currentFile) {
+      if (line.startsWith('+') && !line.startsWith('+++')) fileAdds++;
+      else if (line.startsWith('-') && !line.startsWith('---')) fileDels++;
+      currentFile.lines.push(line);
+    }
+  }
+  if (currentFile) {
+    currentFile.adds = fileAdds;
+    currentFile.dels = fileDels;
+    files.push(currentFile);
+  }
+
+  const totalAdds = files.reduce((s, f) => s + f.adds, 0);
+  const totalDels = files.reduce((s, f) => s + f.dels, 0);
+
+  // Build sidebar HTML
+  const sidebarItems = files.map((f, i) => {
+    const icon = f.name.endsWith('.md') ? '' : f.name.endsWith('.ex') || f.name.endsWith('.exs') ? '' : '';
+    return `<li class="diff-file-item" data-file-idx="${i}" onclick="scrollToFile(${i})">
+      <span class="diff-file-icon">${icon}</span>
+      <span class="diff-file-name" title="${htmlEscape(f.name)}">${htmlEscape(f.name)}</span>
+      <span class="diff-file-stats">
+        ${f.adds ? `<span class="add">+${f.adds}</span>` : ''}
+        ${f.dels ? `<span class="del">-${f.dels}</span>` : ''}
+      </span>
+    </li>`;
+  }).join('');
+
+  // Build content HTML — file headers outside <pre> so they render as blocks
+  let contentHtml = '';
+  let inPre = false;
+  for (const line of lines) {
+    if (line.startsWith('diff --git')) {
+      if (inPre) { contentHtml += '</pre>'; inPre = false; }
+      const parts = line.split(' ');
+      const bPath = parts[3] || '';
+      const fullPath = bPath.replace(/^b\//, '');
+      const cleanName = stripTempPath(fullPath);
+      contentHtml += `<div class="diff-file-header" id="diff-file-${files.findIndex(f => f.name === cleanName)}">${htmlEscape(cleanName)}</div>`;
+    } else if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('index ') || line.startsWith('new file') || line.startsWith('deleted file') || line.startsWith('old mode') || line.startsWith('new mode')) {
+      // skip
+    } else {
+      if (!inPre) { contentHtml += '<pre>'; inPre = true; }
+      if (line.startsWith('@@')) {
+        contentHtml += `<span class="diff-hunk">${htmlEscape(line)}</span>\n`;
+      } else if (line.startsWith('+')) {
+        contentHtml += `<span class="diff-add">${htmlEscape(line)}</span>\n`;
+      } else if (line.startsWith('-')) {
+        contentHtml += `<span class="diff-remove">${htmlEscape(line)}</span>\n`;
+      } else {
+        contentHtml += `<span class="diff-context">${htmlEscape(line)}</span>\n`;
+      }
+    }
+  }
+  if (inPre) contentHtml += '</pre>';
+
+  return `<div class="diff-viewer">
+    <div class="diff-sidebar" id="diff-sidebar">
+      <div class="diff-sidebar-header">
+        <span>${files.length} file${files.length !== 1 ? 's' : ''} · <span style="color:var(--green)">+${totalAdds}</span> · <span style="color:var(--red)">-${totalDels}</span></span>
+        <span style="display:flex;gap:4px">
+          <button class="diff-sidebar-toggle" onclick="copyDiff()">Copy</button>
+          <button class="diff-sidebar-toggle" onclick="toggleDiffSidebar()">Hide</button>
+        </span>
+      </div>
+      <ul class="diff-file-list">${sidebarItems}</ul>
+    </div>
+    <div class="diff-content">${contentHtml}</div>
+  </div>`;
+}
+
+function scrollToFile(idx) {
+  const el = document.getElementById('diff-file-' + idx);
+  const content = document.querySelector('.diff-content');
+  if (el && content) {
+    const top = el.offsetTop - content.offsetTop;
+    content.scrollTo({ top, behavior: 'smooth' });
+    document.querySelectorAll('.diff-file-item').forEach(i => i.classList.remove('active'));
+    document.querySelector(`.diff-file-item[data-file-idx="${idx}"]`)?.classList.add('active');
+  }
+}
+
+function copyDiff() {
+  const el = document.querySelector('.diff-content pre');
+  if (el) {
+    navigator.clipboard.writeText(el.textContent).then(() => {
+      bridge.ui.toast('Diff copied to clipboard', 'success');
+    }).catch(() => {});
+  }
+}
+
+function toggleDiffSidebar() {
+  const sidebar = document.getElementById('diff-sidebar');
+  const btn = sidebar?.querySelector('.diff-sidebar-toggle:last-child');
+  if (sidebar?.classList.contains('collapsed')) {
+    sidebar.classList.remove('collapsed');
+    if (btn) btn.textContent = 'Hide';
+  } else {
+    sidebar?.classList.add('collapsed');
+    if (btn) btn.textContent = 'Show';
+  }
+}
+
+function renderReviewPanel() {
+  if (!selectedReview) return '';
+  const dep = selectedReview.dep;
+  const type = updateType(dep.current, dep.latest);
+  const links = selectedReview.info
+    ? buildPackageLinks(dep, selectedReview.info)
+    : buildPackageLinks(dep, null);
+  const majorWarning = type === 'major'
+    ? '<div class="review-warning">Major version change. Treat this as potentially breaking until the package release notes say otherwise.</div>'
+    : '';
+  const directAllowsLatest = constraintAllowsVersion(dep.constraint, dep.latest);
+  const blockedWarning = !dep.outdated && dep.current !== dep.latest
+    ? directAllowsLatest === true
+      ? '<div class="review-warning">The direct mix.exs constraint appears to allow the latest version. This is likely blocked by another dependency constraint or resolver conflict, not by this package line alone.</div>'
+      : '<div class="review-warning">This update appears blocked by the direct mix.exs constraint. Review release notes before editing the constraint.</div>'
+    : '';
+  const linkButtons = links.map(([label, url]) =>
+    `<button onclick="openUrl('${esc(url)}')" title="${htmlEscape(url)}">${htmlEscape(label)}</button>`
+  ).join('');
+  const diffUrl = dep.current !== dep.latest ? hexDiffUrl(dep.name, dep.current, dep.latest) : null;
+  const diffPreviewButton = diffUrl
+    ? `<button onclick="toggleDiffPreview()">${selectedReview.showDiff ? 'Hide diff preview' : 'Preview diff'}</button>`
+    : '';
+  const diffPreview = diffUrl && selectedReview.showDiff
+    ? (selectedReview.diffHtml || '<div class="diff-viewer"><div class="diff-sidebar"><div class="diff-sidebar-header"><span>Loading…</span></div></div><div class="diff-content"><div class="shimmer">' + Array(10).fill('<div class="shimmer-line"></div>').join('') + '</div></div></div>')
+    : '';
+  const releaseButtons = (selectedReview.info?.releases || [])
+    .slice(0, 5)
+    .map(r => `<button onclick="openUrl('${esc(hexReleaseUrl(dep.name, r.version))}')">${htmlEscape(r.version)}</button>`)
+    .join('');
+  const action = dep.outdated
+    ? `<button class="update-btn" onclick="updateDep('${esc(dep.name)}', true)">Update after review</button>`
+    : dep.current !== dep.latest && directAllowsLatest !== true
+      ? `<button class="bump-btn" onclick="bumpDep('${esc(dep.name)}', '${esc(suggestedConstraint(dep.latest, dep.constraint))}', true)">Bump after review</button>`
+      : '';
+  const loading = selectedReview.loading
+    ? `<div class="review-note"><span class="updating-indicator"><span class="mini-spinner"></span>Analyzing dependency conflict…</span></div>`
+    : '';
+  const error = selectedReview.error ? `<div class="error-box">${htmlEscape(selectedReview.error)}</div>` : '';
+  const conflictBlock = renderConflictBlock(selectedReview.conflict, dep);
+  const diagnostics = selectedReview.diagnostics ? `<div class="diagnostic-box">${htmlEscape(selectedReview.diagnostics)}</div>` : '';
+  const desc = selectedReview.info?.meta?.description
+    ? `<div class="review-note">${htmlEscape(selectedReview.info.meta.description)}</div>`
+    : '';
+
+  return `<div class="review-panel">
+    <div class="review-head">
+      <div>
+        <div class="review-title">${htmlEscape(dep.name)}</div>
+        <div class="review-meta">${htmlEscape(dep.current)} → ${htmlEscape(dep.latest)} · ${htmlEscape(type)} · ${dep.constraint ? `constraint ${htmlEscape(dep.constraint)}` : 'no direct constraint found'}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        ${action}
+        <button onclick="selectedReview=null;render()">Close</button>
+      </div>
+    </div>
+    ${desc}
+    ${majorWarning}
+    ${blockedWarning}
+    <div class="review-links">${diffPreviewButton}${linkButtons}</div>
+    ${diffPreview}
+    ${releaseButtons ? `<div class="review-note">Recent releases</div><div class="review-links">${releaseButtons}</div>` : ''}
+    ${loading}
+    ${error}
+    ${conflictBlock}
+    ${diagnostics}
+  </div>`;
+}
+
+// Render the structured "why is this blocked" analysis with an actionable fix.
+function renderConflictBlock(conflict, dep) {
+  if (!conflict) return '';
+  if (!conflict.blockers.length) {
+    return `<div class="review-note">No version conflict found in mix.lock — every dependency already allows ${htmlEscape(dep.latest)}. The block is likely in the solver itself. Try "Update all".</div>`;
+  }
+
+  // A sub-dep with no pinner is free to move — it just needs to be named in the
+  // update command (Mix doesn't auto-unlock transitive deps). One with pinners
+  // that can't move is a real conflict.
+  const freeSubs = [];          // names that only need to be named
+  const fixablePkgs = new Set(); // pinners whose latest release unblocks
+  let anyHardBlocked = false;
+  const lines = [];
+
+  for (const b of conflict.blockers) {
+    lines.push(`<div style="margin-bottom:4px"><span class="dep-name">${htmlEscape(dep.name)} ${htmlEscape(dep.latest)}</span> needs <span class="constraint-tag blocked">${htmlEscape(b.sub)} ${htmlEscape(b.need)}</span> — locked at <span class="ver ver-current">${htmlEscape(b.locked)}</span></div>`);
+    if (!b.pinnedBy.length) {
+      freeSubs.push(b.sub);
+      lines.push(`<div class="review-note" style="margin:0 0 8px 12px;color:var(--green)">↳ nothing pins it — will co-update once named</div>`);
+      continue;
+    }
+    for (const p of b.pinnedBy) {
+      let verdict;
+      if (p.fixable === true) {
+        fixablePkgs.add(p.pkg);
+        verdict = `<span style="color:var(--green)">latest ${htmlEscape(p.latest)} allows ${htmlEscape(p.latestReq || '')} → updating it unblocks</span>`;
+      } else if (p.fixable === false) {
+        anyHardBlocked = true;
+        verdict = `<span style="color:var(--amber)">latest ${htmlEscape(p.latest || '?')} still ${htmlEscape(p.latestReq || p.req)} → no compatible release</span>`;
+      } else {
+        anyHardBlocked = true;
+        verdict = `<span class="ver-current">could not check latest release</span>`;
+      }
+      lines.push(`<div style="margin:0 0 8px 12px">↳ held by <span class="dep-name">${htmlEscape(p.pkg)}${p.pkgVersion ? ' ' + htmlEscape(p.pkgVersion) : ''}</span> (<span class="constraint-tag">${htmlEscape(b.sub)} ${htmlEscape(p.req)}</span>) — ${verdict}</div>`);
+    }
+  }
+
+  // Updatable when no real conflict is hard-blocked: every pinned sub-dep has at
+  // least one fixable pinner. Free subs are always satisfiable by naming them.
+  const pinnedBlockers = conflict.blockers.filter(b => b.pinnedBy.length);
+  const allResolvable = !anyHardBlocked &&
+    pinnedBlockers.every(b => b.pinnedBy.some(p => p.fixable === true));
+
+  let action = '';
+  if (allResolvable) {
+    const subs = conflict.blockers.map(b => b.sub);
+    const uniq = [...new Set([dep.name, ...subs, ...fixablePkgs])];
+    action = `<div style="margin-top:10px"><button class="update-btn" onclick="updateTogether(${JSON.stringify(uniq).replace(/"/g, '&quot;')})">Update together: ${uniq.map(htmlEscape).join(' + ')}</button></div>`;
+  } else if (anyHardBlocked) {
+    action = `<div class="review-warning" style="margin-top:10px">Not updatable right now — a pinning package has no release compatible with what ${htmlEscape(dep.name)} ${htmlEscape(dep.latest)} requires. Options: wait for it to support the newer version, replace it, or add <code>override: true</code> on the conflicting dep (risky — verify against its API).</div>`;
+  }
+
+  return `<div class="review-panel" style="margin:10px 0 0;background:rgba(0,0,0,0.18)">
+    <div class="review-meta" style="margin-bottom:8px;color:var(--text-dim)">Why ${htmlEscape(dep.name)} can't reach ${htmlEscape(dep.latest)}</div>
+    ${lines.join('')}
+    ${action}
+  </div>`;
+}
+
+// ── Load ──────────────────────────────────────────────────────────────────────
+
+async function load() {
+  if (loading) return;
+  loading = true;
+  setContent(`
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <span>Running mix hex.outdated…</span>
+      <div class="progress-line" id="prog"></div>
+    </div>
+  `);
+  document.getElementById('btn-update-all').style.display = 'none';
+
+  let result;
+  try {
+    result = await runStream(showAll ? 'mix hex.outdated --all' : 'mix hex.outdated', (line) => {
+      const el = document.getElementById('prog');
+      if (el && line.trim()) el.textContent = line.trim();
+    });
+  } catch (e) {
+    setContent(`<div class="error-box">Failed to run mix: ${e}</div>`);
+    loading = false;
+    return;
+  }
+
+  if (result.code !== 0 && !result.stdout) {
+    setContent(`<div class="error-box">${result.stderr || 'mix hex.outdated failed'}</div>`);
+    loading = false;
+    return;
+  }
+
+  deps = parseMixOutdated(result.stdout);
+
+  // Read mix.exs to get version constraints for each dep.
+  try {
+    const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
+    if (mixResult.code === 0) {
+      mixConstraints = parseMixExsConstraints(mixResult.stdout);
+    }
+  } catch (_) {
+    mixConstraints = {};
+  }
+
+  // Attach constraint info to each dep.
+  deps = deps.map(d => ({ ...d, constraint: mixConstraints[d.name] || null }));
+
+  const outdated = deps.filter(d => d.outdated);
+  setTitle(outdated.length);
+
+  if (deps.length === 0) {
+    setContent('<div class="empty"><span>No Mix dependencies found</span><span style="font-size:11px;color:var(--text-muted)">Is this a Mix project?</span></div>');
+    loading = false;
+    return;
+  }
+
+  if (outdated.length > 0) {
+    document.getElementById('btn-update-all').style.display = 'inline-flex';
+  }
+
+  render();
+  loading = false;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+
+function render() {
+  const outdated = deps.filter(d => d.outdated);
+  const blocked  = deps.filter(d => !d.outdated && d.current !== d.latest);
+  let html = '';
+
+  if (outdated.length === 0 && blocked.length === 0) {
+    html += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;font-size:11px;color:var(--green)">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M4 6l1.5 1.5L8.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      All ${deps.length} dependencies are up to date
+    </div>`;
+  } else {
+    const minorCount = outdated.filter(d => updateType(d.current, d.latest) === 'minor').length;
+    const majorCount = outdated.filter(d => updateType(d.current, d.latest) === 'major').length;
+    const patchCount = outdated.filter(d => updateType(d.current, d.latest) === 'patch').length;
+    html += `<div class="stats">
+      <span class="stat"><span class="badge badge-ok">${deps.length - outdated.length - blocked.length}</span> up to date</span>
+      ${minorCount ? `<span class="stat"><span class="badge badge-minor">${minorCount}</span> minor</span>` : ''}
+      ${majorCount ? `<span class="stat"><span class="badge badge-major">${majorCount}</span> major</span>` : ''}
+      ${patchCount ? `<span class="stat"><span class="badge badge-patch">${patchCount}</span> patch</span>` : ''}
+      ${blocked.length ? `<span class="stat"><span class="badge badge-blocked">${blocked.length}</span> constraint blocked</span>` : ''}
+    </div>`;
+  }
+
+  const sorted = [...deps].sort((a, b) => {
+    // Order: updatable → blocked → up-to-date
+    const rank = d => d.outdated ? 0 : d.current !== d.latest ? 1 : 2;
+    const dr = rank(a) - rank(b);
+    if (dr !== 0) return dr;
+    return a.name.localeCompare(b.name);
+  });
+
+  html += `<table>
+    <thead><tr>
+      <th>Package</th>
+      <th>Current</th>
+      <th>Latest</th>
+      <th>Constraint</th>
+      <th>Type</th>
+      <th></th>
+    </tr></thead>
+    <tbody>`;
+
+  for (const dep of sorted) {
+    const type = updateType(dep.current, dep.latest);
+    const isBlocked = !dep.outdated && dep.current !== dep.latest;
+    const directAllowsLatest = isBlocked ? constraintAllowsVersion(dep.constraint, dep.latest) : null;
+    const suggested = isBlocked && directAllowsLatest !== true ? suggestedConstraint(dep.latest, dep.constraint) : null;
+
+    let actionHtml = '';
+    if (dep.outdated) {
+      if (type === 'major' && !reviewedDeps.has(dep.name)) {
+        actionHtml = `<button class="info-btn" onclick="showPackageReview('${esc(dep.name)}')">Review</button>`;
+      } else {
+        actionHtml = `<span style="display:inline-flex;gap:6px"><button class="info-btn" onclick="showPackageReview('${esc(dep.name)}')">Review</button><button class="update-btn" onclick="updateDep('${esc(dep.name)}')">Update</button></span>`;
+      }
+    } else if (isBlocked && suggested) {
+      actionHtml = `<button class="bump-btn" onclick="bumpDep('${esc(dep.name)}', '${esc(suggested)}')" title="Review release notes, edit mix.exs: ${esc(dep.constraint)} → ${esc(suggested)}, then mix deps.update ${esc(dep.name)}">${reviewedDeps.has(dep.name) ? `Bump ${suggested}` : 'Review bump'}</button>`;
+    } else if (isBlocked) {
+      actionHtml = `<button class="info-btn" onclick="showConflictDiagnostics('${esc(dep.name)}')" title="Direct constraint appears to allow latest; analyze the transitive conflict">Review conflict</button>`;
+    }
+
+    html += `<tr class="dep-row" data-name="${dep.name}">
+      <td><span class="dep-name"><a href="#" class="dep-link" onclick="openUrl('${esc(hexPackageUrl(dep.name))}');return false;">${dep.name}</a>${dep.env ? `<span class="dep-env">(${dep.env})</span>` : ''}</span></td>
+      <td><span class="ver ver-current">${dep.current}</span></td>
+      <td>${renderLatestVer(dep.current, dep.latest, type)}</td>
+      <td>${renderConstraint(dep)}</td>
+      <td>${renderBadge(type)}</td>
+      <td class="action-col" id="action-${dep.name}">${actionHtml}</td>
+    </tr>`;
+    if (selectedReview?.dep?.name === dep.name) {
+      html += `<tr class="review-row"><td colspan="6">${renderReviewPanel()}</td></tr>`;
+    }
+  }
+
+  html += `</tbody></table>`;
+  document.getElementById('content').innerHTML = html;
+}
+
+function esc(s) {
+  return (s || '').replace(/'/g, "\\'");
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+
+async function refreshData() {
+  try {
+    const result = await bridge.shell.run(showAll ? 'mix hex.outdated --all' : 'mix hex.outdated', { timeout: 120000 });
+    if (result.code === 0 && result.stdout) {
+      deps = parseMixOutdated(result.stdout);
+      try {
+        const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
+        if (mixResult.code === 0) mixConstraints = parseMixExsConstraints(mixResult.stdout);
+      } catch (_) { mixConstraints = {}; }
+      deps = deps.map(d => ({ ...d, constraint: mixConstraints[d.name] || null }));
+      const outdated = deps.filter(d => d.outdated).length;
+      setTitle(outdated);
+      const btn = document.getElementById('btn-update-all');
+      if (btn) btn.style.display = outdated > 0 ? 'inline-flex' : 'none';
+    }
+  } catch (_) {}
+}
+
+async function updateDep(name, reviewed = false) {
+  if (loading) return;
+  const dep = deps.find(d => d.name === name);
+  if (dep && updateType(dep.current, dep.latest) === 'major' && !reviewed && !reviewedDeps.has(name)) {
+    await showPackageReview(name);
+    bridge.ui.toast(`${name} is a major update. Review release notes before updating.`, 'info');
+    return;
+  }
+
+  const actionCell = document.getElementById('action-' + name);
+  if (actionCell) {
+    actionCell.innerHTML = '<span class="updating-indicator"><span class="mini-spinner"></span>Updating…</span>';
+  }
+
+  let result;
+  try {
+    result = await bridge.shell.run(`mix deps.update ${shellQuote(name)}`, { timeout: 120000 });
+  } catch (e) {
+    bridge.ui.toast(`Error: ${e}`, 'error');
+    render();
+    return;
+  }
+  if (result.code !== 0) {
+    const combined = (result.stderr || '') + (result.stdout || '');
+    if (combined.includes('Unknown dependency')) {
+      bridge.ui.toast(`${name} is a transitive dep — use "Update all" instead`, 'info');
+      render();
+      return;
+    }
+    const msg = (combined || 'mix deps.update failed').trim();
+    setContent(`<div class="error-box">Failed to update ${name}:\n\n${htmlEscape(msg)}</div>`);
+    bridge.ui.toast(`Failed to update ${name}`, 'error');
+    setTimeout(() => render(), 4000);
+    return;
+  }
+
+  selectedReview = null;
+  await refreshData();
+  render();
+
+  const stillOutdated = deps.find(d => d.name === name && d.outdated);
+  if (stillOutdated) {
+    await showConflictDiagnostics(name, `${name} did not change after mix deps.update ${name}. Another dependency constraint likely blocks the latest release.`);
+    bridge.ui.toast(`${name} unchanged; analyzing conflict`, 'info');
+  } else {
+    bridge.ui.toast(`${name} updated`, 'success');
+  }
+}
+
+// Unlock the target plus its blocking co-deps in one resolver pass.
+async function updateTogether(names) {
+  if (loading || !Array.isArray(names) || !names.length) return;
+  selectedReview = null;
+  let result;
+  try {
+    result = await runWithProgress(
+      `mix deps.update ${names.map(shellQuote).join(' ')}`,
+      `Updating ${names.join(', ')}…`
+    );
+  } catch (e) {
+    bridge.ui.toast(`Error: ${e}`, 'error');
+    render();
+    return;
+  }
+  if (result.timed_out) {
+    bridge.ui.toast('Update timed out', 'error');
+    render();
+    return;
+  }
+  if (result.code !== 0) {
+    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
+    setContent(`<div class="error-box">Combined update failed:\n\n${htmlEscape(msg)}</div>`);
+    bridge.ui.toast('Combined update failed', 'error');
+    setTimeout(() => render(), 4000);
+    return;
+  }
+  await refreshData();
+  render();
+  bridge.ui.toast(`Updated ${names.join(', ')}`, 'success');
+}
+
+async function bumpDep(name, newConstraint, reviewed = false) {
+  if (loading) return;
+  if (!reviewed && !reviewedDeps.has(name)) {
+    await showPackageReview(name);
+    bridge.ui.toast(`${name} needs a constraint bump. Review release notes before editing mix.exs.`, 'info');
+    return;
+  }
+
+  const actionCell = document.getElementById('action-' + name);
+  if (actionCell) {
+    actionCell.innerHTML = '<span class="updating-indicator"><span class="mini-spinner"></span>Bumping…</span>';
+  }
+
+  // Backup mix.exs
+  const backupResult = await bridge.shell.run(`cp mix.exs mix.exs.bump.bak`, { timeout: 5000 });
+  if (backupResult.code !== 0) {
+    bridge.ui.toast('Failed to backup mix.exs', 'error');
+    render();
+    return;
+  }
+
+  // Apply constraint bump
+  const perlScript = `BEGIN{$n=$ENV{DEP};$c=$ENV{C}}s/(\\{:\\Q$n\\E,\\s*")[^"]+(")/$1$c$2/`;
+  const bumpResult = await bridge.shell.run(
+    `DEP=${shellQuote(name)} C=${shellQuote(newConstraint)} perl -0pi -e '${perlScript}' mix.exs`,
+    { timeout: 5000 }
+  );
+
+  if (bumpResult.code !== 0) {
+    await bridge.shell.run(`mv mix.exs.bump.bak mix.exs`, { timeout: 5000 });
+    bridge.ui.toast('Failed to edit mix.exs', 'error');
+    render();
+    return;
+  }
+
+  // Run mix deps.update
+  const updateResult = await bridge.shell.run(`mix deps.update ${shellQuote(name)}`, { timeout: 120000 });
+
+  if (updateResult.code !== 0) {
+    await bridge.shell.run(`mv mix.exs.bump.bak mix.exs`, { timeout: 5000 });
+    const msg = ((updateResult.stderr || '') + (updateResult.stdout || '') || 'deps.update failed').trim();
+    const shortMsg = msg.split('\n').filter(l => l.includes('dependency') || l.includes('requirement') || l.includes('constraint') || l.startsWith('**')).slice(0, 3).join('\n') || msg.slice(0, 200);
+    setContent(`<div class="error-box">Bump reverted — constraint conflict:\n\n${htmlEscape(shortMsg)}</div>`);
+    bridge.ui.toast(`${name} bump reverted`, 'error');
+    setTimeout(() => render(), 5000);
+    return;
+  }
+
+  await bridge.shell.run(`rm -f mix.exs.bump.bak`, { timeout: 5000 });
+
+  selectedReview = null;
+  await refreshData();
+  render();
+  bridge.ui.toast(`${name} bumped to ${newConstraint} and updated`, 'success');
+}
+
+async function updateAll() {
+  if (loading) return;
+  const outdated = deps.filter(d => d.outdated);
+  if (!outdated.length) return;
+  const unreviewedMajor = outdated.find(d => updateType(d.current, d.latest) === 'major' && !reviewedDeps.has(d.name));
+  if (unreviewedMajor) {
+    await showPackageReview(unreviewedMajor.name);
+    bridge.ui.toast(`${unreviewedMajor.name} is a major update. Review it before updating all.`, 'info');
+    return;
+  }
+  const prevCount = outdated.length;
+
+  let result;
+  try {
+    result = await runWithProgress(
+      'mix deps.update --all',
+      `Updating ${outdated.length} package${outdated.length > 1 ? 's' : ''}…`
+    );
+  } catch (e) {
+    bridge.ui.toast(`Error: ${e}`, 'error');
+    render();
+    return;
+  }
+  if (result.timed_out) {
+    bridge.ui.toast('Update timed out', 'error');
+    render();
+    return;
+  }
+  if (result.code !== 0) {
+    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
+    setContent(`<div class="error-box">Update failed:\n\n${msg}</div>`);
+    bridge.ui.toast('Update failed', 'error');
+    setTimeout(() => render(), 4000);
+    return;
+  }
+  await refreshData();
+  render();
+  const nowOutdated = deps.filter(d => d.outdated).length;
+  const updated = prevCount - nowOutdated;
+  if (updated === 0) {
+    bridge.ui.toast('No packages updated (constraint conflicts)', 'info');
+  } else if (nowOutdated === 0) {
+    bridge.ui.toast('All packages updated', 'success');
+  } else {
+    bridge.ui.toast(`${updated} of ${prevCount} packages updated`, 'success');
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+document.getElementById('btn-refresh').addEventListener('click', load);
+document.getElementById('btn-update-all').addEventListener('click', updateAll);
+document.getElementById('btn-toggle-all').addEventListener('click', () => {
+  showAll = !showAll;
+  document.getElementById('btn-toggle-all').textContent = showAll ? 'Direct only' : 'Show all';
+  load();
+});
+bridge.events.on('app:started', () => load());
+
+load();
+</script>
+</body>
+</html>

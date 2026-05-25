@@ -1,0 +1,20 @@
+{
+  "id": "phoenix-packages",
+  "name": "Phoenix Package Manager",
+  "version": "0.2.0",
+  "description": "View, update, and diagnose Mix dependency conflicts for Phoenix/Elixir apps",
+  "author": "Porta",
+  "activateOn": ["app:kind:phoenix", "app:kind:elixir"],
+  "permissions": ["shell"],
+  "main": "index.html",
+  "contributes": {
+    "appActions": [
+      {
+        "id": "show-packages",
+        "label": "Packages",
+        "icon": "package",
+        "tooltip": "View Mix dependencies"
+      }
+    ]
+  }
+}
