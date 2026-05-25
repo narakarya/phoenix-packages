@@ -24,6 +24,22 @@ Or **Install from folder…** and select this directory.
   combined "Update together" when resolvable.
 - Hex diff preview, release links, and package metadata inline.
 
+## Updating
+
+Porta installs an extension by fetching a **branch** zip from GitHub (tags and
+releases are ignored) and replaces any installed extension with the same
+`porta.json` `id`. To update:
+
+- **From GitHub:** Settings → Extensions → **Update** (re-fetches the stored
+  source ref), or re-run *Install from GitHub* with the same `owner/repo`.
+- **Pin a channel** with a branch, e.g. install `owner/repo@stable` and
+  fast-forward `stable` only when you cut a release.
+- **Local dev:** *Install from folder* re-reads this directory each time — the
+  fastest iteration loop, no push needed.
+
+The `version` field below is metadata for display; keep `id` stable so updates
+replace in place.
+
 ## Files
 
 - `porta.json` — extension manifest
