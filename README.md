@@ -16,12 +16,19 @@ Or **Install from folder…** and select this directory.
   and update type (patch/minor/major).
 - One-click **Update** (with review gate for major bumps) and **Bump** (edits the
   `mix.exs` constraint, then `mix deps.update`).
-- **Conflict diagnostics** — when a dep can't reach its latest version, it reads
-  the target release's requirements (Hex API), cross-references the locked
-  sub-dep versions in `mix.lock`, and finds which installed package pins the
-  blocker below the needed range. Each pinner is classified **fixable**
-  (its latest release relaxes the constraint) or **hard-blocked**, and offers a
-  combined "Update together" when resolvable.
+- **Conflict diagnostics** — when a dep can't reach its latest version, it
+  diagnoses both directions:
+  - *Reverse (dependents)* — finds installed packages whose own requirement on
+    the dep forbids the latest release. This is the usual reason a lone
+    `mix deps.update <pkg>` is a no-op (Mix won't unlock the package holding it
+    back), and is exactly what the old "block is in the solver" dead-end missed.
+  - *Forward (sub-deps)* — reads the target release's requirements (Hex API),
+    cross-references the locked sub-dep versions in `mix.lock`, and finds which
+    installed package pins a needed sub-dep below range.
+
+  Each blocker is classified **fixable** (its latest release relaxes/drops the
+  constraint) or **hard-blocked**, and offers a combined "Update together" that
+  unlocks every fixable package at once when the conflict is resolvable.
 - Hex diff preview, release links, and package metadata inline.
 
 ## Updating

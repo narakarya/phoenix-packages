@@ -866,9 +866,16 @@ async function showPackageReview(name) {
   render();
 }
 
-// Analyze WHY a dep can't reach its latest version, using the target release's
-// requirements (Hex API) cross-referenced against the locked sub-dep versions.
-// Returns { blockers: [{ sub, need, locked, pinnedBy: [{pkg, req}] }] }.
+// Analyze WHY a dep can't reach its latest version. Two independent causes:
+//
+//   1. Forward — name@latest pulls in a sub-dep that some installed package
+//      pins below the version the new release needs.
+//   2. Reverse (dependents) — an installed package requires `name` itself with
+//      a constraint that forbids `latest`. This is the usual reason a lone
+//      `mix deps.update name` is a no-op: Mix won't unlock the package holding
+//      it back, so the solver keeps the old version.
+//
+// Returns { blockers: [{ sub, need, locked, pinnedBy }], dependents: [{ pkg, pkgVersion, req }] }.
 async function diagnoseConflict(name, latest) {
   const targetReqs = await getReleaseRequirements(name, latest);
   const lockResult = await bridge.shell.run('cat mix.lock', { timeout: 5000 });
@@ -894,7 +901,19 @@ async function diagnoseConflict(name, latest) {
     }
     blockers.push({ sub, need: info.requirement, locked: locked.version, pinnedBy });
   }
-  return { blockers };
+
+  // Reverse: installed packages whose requirement on `name` excludes `latest`.
+  const dependents = [];
+  for (const [pkg, pinfo] of Object.entries(lock)) {
+    if (pkg === name) continue;
+    for (const r of pinfo.reqs) {
+      if (r.dep === name && !r.optional && versionSatisfies(r.req, latest) === false) {
+        dependents.push({ pkg, pkgVersion: pinfo.version, req: r.req });
+      }
+    }
+  }
+
+  return { blockers, dependents };
 }
 
 // Would updating a pinning package to its latest release relax the constraint?
@@ -914,6 +933,24 @@ async function isBlockerFixable(pkg, currentReq, sub, need) {
   }
 }
 
+// Would updating a dependent package to its latest release let it accept
+// name@latest (either by relaxing its requirement or dropping the dep)?
+// Returns { latest, latestReq, fixable, drops }.
+async function isDependentFixable(pkg, name, latest) {
+  try {
+    const info = await getPackageInfo(pkg);
+    const pkgLatest = info.latest_stable_version || info.latest_version || (info.releases || [])[0]?.version;
+    if (!pkgLatest) return { latest: null, latestReq: null, fixable: null, drops: false };
+    const reqs = await getReleaseRequirements(pkg, pkgLatest);
+    const latestReq = reqs[name]?.requirement ?? null;
+    const drops = latestReq == null;
+    const fixable = drops || versionSatisfies(latestReq, latest) === true;
+    return { latest: pkgLatest, latestReq, fixable, drops };
+  } catch (_) {
+    return { latest: null, latestReq: null, fixable: null, drops: false };
+  }
+}
+
 async function showConflictDiagnostics(name, reason) {
   const dep = deps.find(d => d.name === name);
   if (!dep) return;
@@ -927,6 +964,10 @@ async function showConflictDiagnostics(name, reason) {
       for (const p of b.pinnedBy) {
         Object.assign(p, await isBlockerFixable(p.pkg, p.req, b.sub, b.need));
       }
+    }
+    // Enrich each dependent with whether its latest release would accept the target.
+    for (const d of (conflict.dependents || [])) {
+      Object.assign(d, await isDependentFixable(d.pkg, name, dep.latest));
     }
     const info = await getPackageInfo(name).catch(() => null);
     selectedReview = { ...selectedReview, loading: false, info, conflict };
@@ -1173,22 +1214,49 @@ function renderReviewPanel() {
 // Render the structured "why is this blocked" analysis with an actionable fix.
 function renderConflictBlock(conflict, dep) {
   if (!conflict) return '';
-  if (!conflict.blockers.length) {
-    return `<div class="review-note">No version conflict found in mix.lock — every dependency already allows ${htmlEscape(dep.latest)}. The block is likely in the solver itself. Try "Update all".</div>`;
+  const forward = conflict.blockers || [];
+  const dependents = conflict.dependents || [];
+
+  if (!forward.length && !dependents.length) {
+    // No constraint in the lock forbids the target — so the no-op isn't a real
+    // version conflict. Point at the cases the lock can't reveal.
+    return `<div class="review-note">No constraint in <code>mix.lock</code> forbids ${htmlEscape(dep.latest)} — neither ${htmlEscape(dep.name)}'s own requirements nor any installed dependent blocks it. The version is likely only reachable by re-resolving the whole tree, or the latest release was retired. Try <code>mix deps.update --all</code>, or check <code>mix hex.info ${htmlEscape(dep.name)}</code>.</div>`;
+  }
+
+  const fixablePkgs = new Set(); // packages whose latest release unblocks
+  let anyHardBlocked = false;
+  const lines = [];
+
+  // Reverse dependents first — the usual reason a lone deps.update is a no-op.
+  if (dependents.length) {
+    lines.push(`<div class="review-meta" style="margin:0 0 4px;color:var(--text-dim)">Held back by packages that depend on ${htmlEscape(dep.name)}:</div>`);
+  }
+  for (const d of dependents) {
+    let verdict;
+    if (d.fixable === true) {
+      fixablePkgs.add(d.pkg);
+      verdict = d.drops
+        ? `<span style="color:var(--green)">latest ${htmlEscape(d.latest)} no longer depends on ${htmlEscape(dep.name)} → updating it unblocks</span>`
+        : `<span style="color:var(--green)">latest ${htmlEscape(d.latest)} allows ${htmlEscape(d.latestReq || '')} → updating it unblocks</span>`;
+    } else if (d.fixable === false) {
+      anyHardBlocked = true;
+      verdict = `<span style="color:var(--amber)">latest ${htmlEscape(d.latest || '?')} still ${htmlEscape(d.latestReq || d.req)} → no compatible release</span>`;
+    } else {
+      anyHardBlocked = true;
+      verdict = `<span class="ver-current">could not check latest release</span>`;
+    }
+    lines.push(`<div style="margin:0 0 8px 12px">↳ <span class="dep-name">${htmlEscape(d.pkg)}${d.pkgVersion ? ' ' + htmlEscape(d.pkgVersion) : ''}</span> requires <span class="constraint-tag blocked">${htmlEscape(dep.name)} ${htmlEscape(d.req)}</span> — ${verdict}</div>`);
   }
 
   // A sub-dep with no pinner is free to move — it just needs to be named in the
   // update command (Mix doesn't auto-unlock transitive deps). One with pinners
   // that can't move is a real conflict.
-  const freeSubs = [];          // names that only need to be named
-  const fixablePkgs = new Set(); // pinners whose latest release unblocks
-  let anyHardBlocked = false;
-  const lines = [];
-
-  for (const b of conflict.blockers) {
+  if (forward.length) {
+    lines.push(`<div class="review-meta" style="margin:6px 0 4px;color:var(--text-dim)">${htmlEscape(dep.name)} ${htmlEscape(dep.latest)} needs newer sub-dependencies:</div>`);
+  }
+  for (const b of forward) {
     lines.push(`<div style="margin-bottom:4px"><span class="dep-name">${htmlEscape(dep.name)} ${htmlEscape(dep.latest)}</span> needs <span class="constraint-tag blocked">${htmlEscape(b.sub)} ${htmlEscape(b.need)}</span> — locked at <span class="ver ver-current">${htmlEscape(b.locked)}</span></div>`);
     if (!b.pinnedBy.length) {
-      freeSubs.push(b.sub);
       lines.push(`<div class="review-note" style="margin:0 0 8px 12px;color:var(--green)">↳ nothing pins it — will co-update once named</div>`);
       continue;
     }
@@ -1208,19 +1276,20 @@ function renderConflictBlock(conflict, dep) {
     }
   }
 
-  // Updatable when no real conflict is hard-blocked: every pinned sub-dep has at
-  // least one fixable pinner. Free subs are always satisfiable by naming them.
-  const pinnedBlockers = conflict.blockers.filter(b => b.pinnedBy.length);
+  // Updatable when nothing is hard-blocked: every pinned sub-dep has a fixable
+  // pinner, and every dependent's latest release accepts the target.
+  const pinnedBlockers = forward.filter(b => b.pinnedBy.length);
   const allResolvable = !anyHardBlocked &&
-    pinnedBlockers.every(b => b.pinnedBy.some(p => p.fixable === true));
+    pinnedBlockers.every(b => b.pinnedBy.some(p => p.fixable === true)) &&
+    dependents.every(d => d.fixable === true);
 
   let action = '';
   if (allResolvable) {
-    const subs = conflict.blockers.map(b => b.sub);
+    const subs = forward.map(b => b.sub);
     const uniq = [...new Set([dep.name, ...subs, ...fixablePkgs])];
     action = `<div style="margin-top:10px"><button class="update-btn" onclick="updateTogether(${JSON.stringify(uniq).replace(/"/g, '&quot;')})">Update together: ${uniq.map(htmlEscape).join(' + ')}</button></div>`;
   } else if (anyHardBlocked) {
-    action = `<div class="review-warning" style="margin-top:10px">Not updatable right now — a pinning package has no release compatible with what ${htmlEscape(dep.name)} ${htmlEscape(dep.latest)} requires. Options: wait for it to support the newer version, replace it, or add <code>override: true</code> on the conflicting dep (risky — verify against its API).</div>`;
+    action = `<div class="review-warning" style="margin-top:10px">Not updatable right now — a blocking package has no release compatible with ${htmlEscape(dep.name)} ${htmlEscape(dep.latest)}. Options: wait for it to support the newer version, replace it, or add <code>override: true</code> on the conflicting dep (risky — verify against its API).</div>`;
   }
 
   return `<div class="review-panel" style="margin:10px 0 0;background:rgba(0,0,0,0.18)">
@@ -1440,7 +1509,7 @@ async function updateDep(name, reviewed = false) {
 
   const stillOutdated = deps.find(d => d.name === name && d.outdated);
   if (stillOutdated) {
-    await showConflictDiagnostics(name, `${name} did not change after mix deps.update ${name}. Another dependency constraint likely blocks the latest release.`);
+    await showConflictDiagnostics(name, `${name} stayed at ${stillOutdated.current} after mix deps.update ${name}. Analyzing what holds it back:`);
     bridge.ui.toast(`${name} unchanged; analyzing conflict`, 'info');
   } else {
     bridge.ui.toast(`${name} updated`, 'success');
