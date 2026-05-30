@@ -1949,14 +1949,17 @@ async function updateDep(name, reviewed = false) {
   }
 }
 
-// Unlock the target plus its blocking co-deps in one resolver pass.
+// Unlock the target plus its blocking co-deps in one resolver pass. Sub-deps
+// here are usually transitive, so route them through unlock + deps.get rather
+// than deps.update (which only accepts direct deps).
 async function updateTogether(names) {
   if (loading || !Array.isArray(names) || !names.length) return;
   selectedReview = null;
+  const { cmd } = buildUpdateCommand(names);
   let result;
   try {
     result = await runWithProgress(
-      `mix deps.update ${names.map(shellQuote).join(' ')}`,
+      cmd,
       `Updating ${names.join(', ')}…`
     );
   } catch (e) {
@@ -2047,10 +2050,11 @@ async function updateSafe() {
   }
   const names = safe.map(d => d.name);
   selectedReview = null;
+  const { cmd } = buildUpdateCommand(names);
   let result;
   try {
     result = await runWithProgress(
-      `mix deps.update ${names.map(shellQuote).join(' ')}`,
+      cmd,
       `Updating ${names.length} safe package${names.length > 1 ? 's' : ''} (patch + minor)…`
     );
   } catch (e) {
@@ -2072,23 +2076,53 @@ async function updateSafe() {
   bridge.ui.toast('Patch + minor updates applied', 'success');
 }
 
-// Update every package flagged with a known vulnerability to its latest release.
+// Split names into direct deps (declared in mix.exs) and transitive ones
+// (only present in mix.lock). `mix deps.update` rejects transitive names with
+// "Unknown dependency", so each kind needs a different command.
+function partitionByDirectness(names) {
+  const direct = [], transitive = [];
+  for (const n of names) (mixConstraints[n] ? direct : transitive).push(n);
+  return { direct, transitive };
+}
+
+// Build a single shell command that moves every named package to a newer
+// version: direct deps via `deps.update`, transitive deps by unlocking them and
+// re-resolving (`deps.get` pulls the highest version their parents now allow).
+function buildUpdateCommand(names) {
+  const { direct, transitive } = partitionByDirectness(names);
+  const parts = [];
+  if (direct.length) parts.push(`mix deps.update ${direct.map(shellQuote).join(' ')}`);
+  if (transitive.length) {
+    parts.push(`mix deps.unlock ${transitive.map(shellQuote).join(' ')}`);
+    parts.push('mix deps.get');
+  }
+  return { cmd: parts.join(' && '), direct, transitive };
+}
+
+// Update every package flagged with a known vulnerability to a patched release.
 async function updateVulnerable() {
   if (loading) return;
   const names = Object.keys(vulnMap);
   if (!names.length) return;
   selectedReview = null;
+
+  const { cmd, transitive } = buildUpdateCommand(names);
+  const note = transitive.length
+    ? ` (${transitive.length} transitive — unlocking & re-resolving)`
+    : '';
+
   let result;
   try {
     result = await runWithProgress(
-      `mix deps.update ${names.map(shellQuote).join(' ')}`,
-      `Updating ${names.length} vulnerable package${names.length > 1 ? 's' : ''}…`
+      cmd,
+      `Updating ${names.length} vulnerable package${names.length > 1 ? 's' : ''}${note}…`
     );
   } catch (e) {
     bridge.ui.toast(`Error: ${e}`, 'error');
     render();
     return;
   }
+  if (result.timed_out) { bridge.ui.toast('Update timed out', 'error'); render(); return; }
   if (result.code !== 0) {
     const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
     setContent(`<div class="error-box">Vulnerability update failed:\n\n${htmlEscape(msg)}</div>`);
@@ -2099,7 +2133,9 @@ async function updateVulnerable() {
   await refreshData();
   render();
   runSecurityAndHousekeeping();
-  bridge.ui.toast('Vulnerable packages updated — re-auditing', 'success');
+  // The re-audit confirms whether the patched version was actually reachable;
+  // a transitive dep pinned by its parent may still show after unlock.
+  bridge.ui.toast('Updated — re-auditing to confirm', 'success');
 }
 
 // Remove unused entries from mix.lock.
