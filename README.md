@@ -29,6 +29,23 @@ Or **Install from folder…** and select this directory.
   Each blocker is classified **fixable** (its latest release relaxes/drops the
   constraint) or **hard-blocked**, and offers a combined "Update together" that
   unlocks every fixable package at once when the conflict is resolvable.
+- **Security audit** — flags packages with known advisories (`mix deps.audit`
+  via the optional [`mix_audit`](https://hex.pm/packages/mix_audit) dep) and
+  packages **retired** on Hex (`mix hex.audit`). Vulnerable deps get a top
+  banner with a one-click "Update all" and sort to the top of the list; a
+  `vuln`/`retired` badge appears next to the package name and in the review
+  panel. (If `mix_audit` isn't installed, the advisory check is skipped
+  silently — retirement still works.)
+- **Update safe** — a toolbar button that updates only patch + minor releases,
+  skipping major bumps, for routine no-surprise updates.
+- **Unused deps** — detects entries left in `mix.lock` that nothing depends on
+  (`mix deps.unlock --check-unused`) and offers a one-click prune.
+- **Changelog preview** — fetches the package's `CHANGELOG.md` from its GitHub
+  repo and renders just the entries between your version and the latest, inline
+  in the review panel (no browser round-trip).
+- **Required-by graph** — the review panel shows which installed packages pull a
+  dependency in (and whether your app depends on it directly), parsed from
+  `mix.lock`.
 - Hex diff preview, release links, and package metadata inline.
 
 ## Updating

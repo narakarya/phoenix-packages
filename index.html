@@ -152,6 +152,96 @@ button.primary:hover { background: rgba(167,139,250,0.22); }
 .badge-major   { background: rgba(251,191,36,0.12);  color: var(--yellow); }
 .badge-patch   { background: rgba(167,139,250,0.12); color: var(--violet); }
 .badge-blocked { background: rgba(251,146,60,0.12);  color: var(--amber);  }
+.badge-retired { background: rgba(248,113,113,0.14); color: var(--red);    }
+.badge-vuln    { background: rgba(248,113,113,0.18); color: var(--red); font-weight: 600; }
+
+/* Inline marker badges next to a package name */
+.dep-flag {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  cursor: help;
+}
+.dep-flag.retired { background: rgba(248,113,113,0.14); color: var(--red); }
+.dep-flag.vuln    { background: rgba(248,113,113,0.2);  color: var(--red); }
+
+/* Top banners (vulnerabilities / unused deps) */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-size: 11px;
+}
+.banner-actions { margin-left: auto; display: flex; gap: 6px; }
+.banner.danger {
+  background: rgba(248,113,113,0.08);
+  border: 1px solid rgba(248,113,113,0.22);
+  color: var(--red);
+}
+.banner.muted {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.banner.muted code {
+  font-family: monospace;
+  color: var(--text);
+  background: rgba(0,0,0,0.25);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+/* Changelog / required-by blocks inside the review panel */
+.changelog-box {
+  margin-top: 10px;
+  max-height: 300px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(0,0,0,0.24);
+  border: 1px solid rgba(255,255,255,0.06);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.changelog-box h4 {
+  color: var(--violet);
+  font-size: 11px;
+  margin: 10px 0 4px;
+  font-family: monospace;
+}
+.changelog-box h4:first-child { margin-top: 0; }
+.changelog-box ul { margin: 0 0 6px 16px; }
+.changelog-box li { color: var(--text-dim); }
+.changelog-box p { color: var(--text-dim); margin: 0 0 6px; }
+.changelog-box code {
+  font-family: monospace;
+  background: rgba(255,255,255,0.06);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.required-by {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.required-by .dep-name { font-size: 10px; }
+.required-by .tag-direct {
+  color: var(--green);
+  border: 1px solid rgba(52,211,153,0.3);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 9px;
+  margin-left: 4px;
+}
 
 table {
   width: 100%;
@@ -490,6 +580,9 @@ button.info-btn {
 <body>
 <div class="toolbar">
   <span class="toolbar-title">Mix Dependencies</span>
+  <button id="btn-update-safe" style="display:none" title="Update only patch + minor releases (skips major)">
+    Update safe
+  </button>
   <button id="btn-update-all" class="primary" style="display:none">
     Update all outdated
   </button>
@@ -520,6 +613,10 @@ let mixConstraints = {}; // { depName: "~> x.y" }
 let selectedReview = null;
 const reviewedDeps = new Set();
 const packageInfoCache = {};
+let retiredMap = {};   // { depName: { version, reason } } from mix hex.audit
+let vulnMap = {};      // { depName: { version, advisory, url } } from mix deps.audit (mix_audit)
+let unusedDeps = [];   // names flagged by mix deps.unlock --check-unused
+let lockCache = null;  // parsed mix.lock, used for the dependency graph
 
 function setTitle(n) {
   bridge.ui.setTitle(n > 0 ? `Packages (${n} outdated)` : 'Phoenix Packages');
@@ -720,6 +817,112 @@ function parseMixLock(content) {
   return lock;
 }
 
+// ── Security audit + housekeeping ───────────────────────────────────────────────
+
+// `mix hex.audit` lists locked packages the maintainer has *retired* (pulled
+// back) on Hex — often for security or because a release was broken. A package
+// can be "up to date" yet retired, so this is independent of the version check.
+async function runHexAudit() {
+  try {
+    const r = await bridge.shell.run('mix hex.audit', { timeout: 60000 });
+    return parseHexAudit((r.stdout || '') + (r.stderr || ''));
+  } catch (_) {
+    return {};
+  }
+}
+
+function parseHexAudit(out) {
+  const retired = {};
+  for (const line of stripAnsi(out).split('\n')) {
+    const cols = line.trim().split(/\s{2,}/);
+    if (cols.length < 2) continue;
+    const [name, version, ...rest] = cols;
+    // First col a hex package name, second a version → it's a data row.
+    if (!/^[a-z][a-z0-9_]*$/.test(name) || !/^\d+\.\d+/.test(version)) continue;
+    retired[name] = { version, reason: rest.join(' ').trim() || 'retired' };
+  }
+  return retired;
+}
+
+// `mix deps.audit` (the optional mix_audit dep) cross-checks the lock against
+// the Mix audit advisory DB. Absent → we silently skip; present with findings →
+// it exits non-zero and prints one block per advisory.
+async function runVulnAudit() {
+  try {
+    const r = await bridge.shell.run('mix deps.audit', { timeout: 60000 });
+    const out = (r.stdout || '') + (r.stderr || '');
+    // Task not installed — don't treat as "no vulns", just unknown.
+    if (/could not be found|The task "deps.audit"|unknown command/i.test(out)) return null;
+    return parseVulnAudit(out);
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseVulnAudit(out) {
+  const vulns = {};
+  let cur = null;
+  for (const raw of stripAnsi(out).split('\n')) {
+    const line = raw.trim();
+    let m;
+    if ((m = line.match(/^Name:\s*(\S+)/))) {
+      cur = { name: m[1], version: '', advisory: '', url: '' };
+      vulns[cur.name] = cur;
+    } else if (cur && (m = line.match(/^Version:\s*(\S+)/))) {
+      cur.version = m[1];
+    } else if (cur && (m = line.match(/^(?:Advisory|CVE|Title):\s*(.+)/))) {
+      cur.advisory = cur.advisory || m[1].trim();
+    } else if (cur && (m = line.match(/^URL:\s*(\S+)/))) {
+      cur.url = m[1];
+    }
+  }
+  return vulns;
+}
+
+function stripAnsi(s) {
+  return String(s || '').replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+// `mix deps.unlock --check-unused` exits non-zero and names deps left in the
+// lock that nothing depends on anymore — safe to prune.
+async function checkUnused() {
+  try {
+    const r = await bridge.shell.run('mix deps.unlock --check-unused', { timeout: 30000 });
+    if (r.code === 0) return [];
+    const out = (r.stdout || '') + (r.stderr || '');
+    const names = [];
+    for (const line of out.split('\n')) {
+      const m = line.match(/^\s*\*\s+([a-z][a-z0-9_]*)/);
+      if (m) names.push(m[1]);
+    }
+    return names;
+  } catch (_) {
+    return [];
+  }
+}
+
+// Parsed mix.lock, cached per load. Powers the "required by" graph.
+async function getLock() {
+  if (lockCache) return lockCache;
+  try {
+    const r = await bridge.shell.run('cat mix.lock', { timeout: 5000 });
+    lockCache = parseMixLock(r.stdout || '');
+  } catch (_) {
+    lockCache = {};
+  }
+  return lockCache;
+}
+
+// Installed packages that require `name` (its immediate dependents in the lock).
+function requirersOf(lock, name) {
+  const out = [];
+  for (const [pkg, info] of Object.entries(lock)) {
+    if (pkg === name) continue;
+    if (info.reqs.some(r => r.dep === name)) out.push(pkg);
+  }
+  return out.sort();
+}
+
 // ── Version rendering ─────────────────────────────────────────────────────────
 
 function updateType(current, latest) {
@@ -851,6 +1054,124 @@ function buildPackageLinks(dep, info) {
   return links;
 }
 
+// ── Changelog ──────────────────────────────────────────────────────────────────
+
+// Find the GitHub owner/repo from a package's Hex meta links.
+function githubRepo(info) {
+  const links = info?.meta?.links || {};
+  for (const v of Object.values(links)) {
+    const m = String(v).match(/github\.com\/([^/\s]+)\/([^/\s#?]+?)(?:\.git|\/|$)/i);
+    if (m) return { owner: m[1], repo: m[2] };
+  }
+  return null;
+}
+
+const changelogCache = {};
+// Best-effort: pull the project's CHANGELOG from GitHub raw, trying common
+// branch + filename combos. Returns the markdown text or null.
+async function fetchChangelog(info) {
+  const gh = githubRepo(info);
+  if (!gh) return null;
+  const key = `${gh.owner}/${gh.repo}`;
+  if (key in changelogCache) return changelogCache[key];
+
+  const branches = ['main', 'master'];
+  const files = ['CHANGELOG.md', 'Changelog.md', 'changelog.md', 'CHANGELOG', 'CHANGES.md'];
+  for (const b of branches) {
+    for (const f of files) {
+      const url = `https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${b}/${f}`;
+      try {
+        const r = await bridge.shell.run(`curl -fsSL ${shellQuote(url)}`, { timeout: 15000 });
+        if (r.code === 0 && (r.stdout || '').trim()) {
+          changelogCache[key] = r.stdout;
+          return r.stdout;
+        }
+      } catch (_) { /* try next */ }
+    }
+  }
+  changelogCache[key] = null;
+  return null;
+}
+
+// Keep only the changelog sections strictly newer than `current`, up to and
+// including `latest`. Returns { md, truncated } — truncated true if we hit a
+// version heading we recognise (so we know the slice is bounded, not the whole file).
+function sliceChangelog(md, current, latest) {
+  const verRe = /^#{1,4}\s*\[?v?(\d+\.\d+\.\d+[0-9A-Za-z.\-]*)/;
+  const out = [];
+  let capturing = false;
+  let bounded = false;
+  for (const line of md.split('\n')) {
+    const m = line.match(verRe);
+    if (m) {
+      const v = m[1];
+      if (compareVersions(v, current) <= 0) { bounded = true; break; }
+      capturing = compareVersions(v, latest) <= 0;
+    }
+    if (capturing) out.push(line);
+  }
+  return { md: out.join('\n').trim(), bounded };
+}
+
+// Tiny markdown → HTML for changelog slices (headings, bullets, inline code).
+function renderChangelogMd(md) {
+  const html = [];
+  let inList = false;
+  const inline = s => htmlEscape(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
+  const closeList = () => { if (inList) { html.push('</ul>'); inList = false; } };
+  for (const raw of md.split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^#{1,4}\s*(.+)/))) {
+      closeList();
+      html.push(`<h4>${inline(m[1])}</h4>`);
+    } else if ((m = line.match(/^\s*[-*+]\s+(.+)/))) {
+      if (!inList) { html.push('<ul>'); inList = true; }
+      html.push(`<li>${inline(m[1])}</li>`);
+    } else if (line.trim()) {
+      closeList();
+      html.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  closeList();
+  return html.join('');
+}
+
+async function toggleChangelog() {
+  if (!selectedReview) return;
+  if (selectedReview.showChangelog) {
+    selectedReview = { ...selectedReview, showChangelog: false };
+    render();
+    return;
+  }
+  const dep = selectedReview.dep;
+  selectedReview = { ...selectedReview, showChangelog: true, changelogHtml: null };
+  render();
+  try {
+    const info = selectedReview.info || await getPackageInfo(dep.name).catch(() => null);
+    const md = info ? await fetchChangelog(info) : null;
+    let html;
+    if (!md) {
+      html = '<p>No CHANGELOG found in the package\'s GitHub repo. Use the Changelog/Diff links above.</p>';
+    } else {
+      const { md: slice, bounded } = sliceChangelog(md, dep.current, dep.latest);
+      if (!slice) {
+        html = `<p>Couldn't isolate ${htmlEscape(dep.current)} → ${htmlEscape(dep.latest)} in the changelog (non-standard headings). Showing nothing rather than the whole file — use the Changelog link above.</p>`;
+      } else {
+        html = renderChangelogMd(slice) +
+          (bounded ? '' : '<p style="opacity:0.6;margin-top:8px">⚠ couldn\'t find the current version heading — entries above may go further back than your version.</p>');
+      }
+    }
+    selectedReview = { ...selectedReview, changelogHtml: html };
+  } catch (e) {
+    selectedReview = { ...selectedReview, changelogHtml: `<p>Failed to load changelog: ${htmlEscape(String(e))}</p>` };
+  }
+  render();
+}
+
 async function showPackageReview(name) {
   const dep = deps.find(d => d.name === name);
   if (!dep) return;
@@ -858,8 +1179,9 @@ async function showPackageReview(name) {
   reviewedDeps.add(name);
   render();
   try {
-    const info = await getPackageInfo(name);
-    selectedReview = { dep, loading: false, error: null, info, diagnostics: null, showDiff: false, diffHtml: null };
+    const [info, lock] = await Promise.all([getPackageInfo(name), getLock()]);
+    const requiredBy = requirersOf(lock, name);
+    selectedReview = { dep, loading: false, error: null, info, diagnostics: null, requiredBy, showDiff: false, diffHtml: null };
   } catch (e) {
     selectedReview = { dep, loading: false, error: String(e), info: null, diagnostics: null, showDiff: false, diffHtml: null };
   }
@@ -970,7 +1292,9 @@ async function showConflictDiagnostics(name, reason) {
       Object.assign(d, await isDependentFixable(d.pkg, name, dep.latest));
     }
     const info = await getPackageInfo(name).catch(() => null);
-    selectedReview = { ...selectedReview, loading: false, info, conflict };
+    const lock = await getLock();
+    const requiredBy = requirersOf(lock, name);
+    selectedReview = { ...selectedReview, loading: false, info, conflict, requiredBy };
   } catch (e) {
     selectedReview = { ...selectedReview, loading: false, error: String(e) };
   }
@@ -1165,6 +1489,13 @@ function renderReviewPanel() {
   const diffPreviewButton = diffUrl
     ? `<button onclick="toggleDiffPreview()">${selectedReview.showDiff ? 'Hide diff preview' : 'Preview diff'}</button>`
     : '';
+  const changelogButton = dep.current !== dep.latest
+    ? `<button onclick="toggleChangelog()">${selectedReview.showChangelog ? 'Hide changelog' : 'Changelog'}</button>`
+    : '';
+  const changelogBox = selectedReview.showChangelog
+    ? `<div class="changelog-box">${selectedReview.changelogHtml ||
+        '<div class="shimmer">' + Array(5).fill('<div class="shimmer-line"></div>').join('') + '</div>'}</div>`
+    : '';
   const diffPreview = diffUrl && selectedReview.showDiff
     ? (selectedReview.diffHtml || '<div class="diff-viewer"><div class="diff-sidebar"><div class="diff-sidebar-header"><span>Loading…</span></div></div><div class="diff-content"><div class="shimmer">' + Array(10).fill('<div class="shimmer-line"></div>').join('') + '</div></div></div>')
     : '';
@@ -1183,6 +1514,23 @@ function renderReviewPanel() {
   const error = selectedReview.error ? `<div class="error-box">${htmlEscape(selectedReview.error)}</div>` : '';
   const conflictBlock = renderConflictBlock(selectedReview.conflict, dep);
   const diagnostics = selectedReview.diagnostics ? `<div class="diagnostic-box">${htmlEscape(selectedReview.diagnostics)}</div>` : '';
+
+  const securityWarning = [
+    dep.vuln ? `<div class="review-warning" style="border-color:rgba(248,113,113,0.3);background:rgba(248,113,113,0.08);color:var(--red)"><strong>Known vulnerability.</strong> ${htmlEscape(dep.vuln.advisory || 'See the Mix audit advisory.')}${dep.vuln.url ? ` <button style="margin-left:6px" onclick="openUrl('${esc(dep.vuln.url)}')">Advisory</button>` : ''}</div>` : '',
+    dep.retired ? `<div class="review-warning" style="border-color:rgba(248,113,113,0.3);background:rgba(248,113,113,0.08);color:var(--red)"><strong>Retired on Hex.</strong> ${htmlEscape(dep.retired.reason)} — the maintainer pulled this release; move off it.</div>` : '',
+  ].join('');
+
+  const requiredBy = selectedReview.requiredBy;
+  const isDirect = !!dep.constraint;
+  const requiredByHtml = requiredBy
+    ? `<div class="required-by">Required by: ${
+        (isDirect ? '<span class="tag-direct">your app (direct)</span> ' : '')
+      }${
+        requiredBy.length
+          ? requiredBy.map(p => `<span class="dep-name">${htmlEscape(p)}</span>`).join(', ')
+          : (isDirect ? '' : '<span style="color:var(--text-muted)">nothing — orphaned in lock?</span>')
+      }</div>`
+    : '';
   const desc = selectedReview.info?.meta?.description
     ? `<div class="review-note">${htmlEscape(selectedReview.info.meta.description)}</div>`
     : '';
@@ -1199,10 +1547,13 @@ function renderReviewPanel() {
       </div>
     </div>
     ${desc}
+    ${securityWarning}
     ${majorWarning}
     ${blockedWarning}
-    <div class="review-links">${diffPreviewButton}${linkButtons}</div>
+    <div class="review-links">${diffPreviewButton}${changelogButton}${linkButtons}</div>
+    ${changelogBox}
     ${diffPreview}
+    ${requiredByHtml}
     ${releaseButtons ? `<div class="review-note">Recent releases</div><div class="review-links">${releaseButtons}</div>` : ''}
     ${loading}
     ${error}
@@ -1355,20 +1706,79 @@ async function load() {
     return;
   }
 
+  // First paint with version data; audit/unused run in the background so the
+  // list isn't blocked on extra mix/network calls.
   if (outdated.length > 0) {
     document.getElementById('btn-update-all').style.display = 'inline-flex';
   }
+  const safeCount = outdated.filter(d => updateType(d.current, d.latest) !== 'major').length;
+  document.getElementById('btn-update-safe').style.display = safeCount > 0 ? 'inline-flex' : 'none';
 
+  lockCache = null;
   render();
   loading = false;
+
+  runSecurityAndHousekeeping();
+}
+
+// Background pass: retired packages, known vulnerabilities, and unused deps.
+// Each is best-effort and re-renders as results arrive.
+async function runSecurityAndHousekeeping() {
+  const [retired, vulns, unused] = await Promise.all([
+    runHexAudit(),
+    runVulnAudit(),
+    checkUnused(),
+  ]);
+  retiredMap = retired || {};
+  vulnMap = vulns || {};
+  unusedDeps = unused || [];
+
+  deps = deps.map(d => ({
+    ...d,
+    retired: retiredMap[d.name] || null,
+    vuln: vulnMap[d.name] || null,
+  }));
+
+  const vulnCount = Object.keys(vulnMap).length;
+  if (vulnCount > 0) bridge.ui.toast(`${vulnCount} vulnerable package${vulnCount > 1 ? 's' : ''} found`, 'error');
+  render();
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
+
+function renderBanners() {
+  let html = '';
+
+  const vulns = Object.values(vulnMap);
+  if (vulns.length) {
+    const names = vulns.map(v => v.name);
+    html += `<div class="banner danger">
+      <svg width="13" height="13" viewBox="0 0 12 12" fill="none"><path d="M6 1L11 10.5H1L6 1Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M6 5v2.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="6" cy="8.8" r="0.6" fill="currentColor"/></svg>
+      <span><strong>${vulns.length} vulnerable package${vulns.length > 1 ? 's' : ''}</strong> — ${names.map(htmlEscape).join(', ')}. Update to a patched release.</span>
+      <span class="banner-actions">
+        <button class="update-btn" onclick="updateVulnerable()">Update ${vulns.length > 1 ? 'all' : names[0]}</button>
+      </span>
+    </div>`;
+  }
+
+  if (unusedDeps.length) {
+    html += `<div class="banner muted">
+      <span><strong>${unusedDeps.length} unused</strong> in <code>mix.lock</code>: ${unusedDeps.map(htmlEscape).join(', ')} — nothing depends on these.</span>
+      <span class="banner-actions">
+        <button onclick="pruneUnused()">Prune from lock</button>
+      </span>
+    </div>`;
+  }
+
+  return html;
+}
 
 function render() {
   const outdated = deps.filter(d => d.outdated);
   const blocked  = deps.filter(d => !d.outdated && d.current !== d.latest);
   let html = '';
+
+  html += renderBanners();
 
   if (outdated.length === 0 && blocked.length === 0) {
     html += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;font-size:11px;color:var(--green)">
@@ -1385,12 +1795,18 @@ function render() {
       ${majorCount ? `<span class="stat"><span class="badge badge-major">${majorCount}</span> major</span>` : ''}
       ${patchCount ? `<span class="stat"><span class="badge badge-patch">${patchCount}</span> patch</span>` : ''}
       ${blocked.length ? `<span class="stat"><span class="badge badge-blocked">${blocked.length}</span> constraint blocked</span>` : ''}
+      ${Object.keys(vulnMap).length ? `<span class="stat"><span class="badge badge-vuln">${Object.keys(vulnMap).length}</span> vulnerable</span>` : ''}
+      ${Object.keys(retiredMap).length ? `<span class="stat"><span class="badge badge-retired">${Object.keys(retiredMap).length}</span> retired</span>` : ''}
     </div>`;
   }
 
   const sorted = [...deps].sort((a, b) => {
-    // Order: updatable → blocked → up-to-date
-    const rank = d => d.outdated ? 0 : d.current !== d.latest ? 1 : 2;
+    // Order: vulnerable → updatable → blocked → retired → up-to-date
+    const rank = d =>
+      d.vuln ? -1 :
+      d.outdated ? 0 :
+      d.current !== d.latest ? 1 :
+      d.retired ? 1.5 : 2;
     const dr = rank(a) - rank(b);
     if (dr !== 0) return dr;
     return a.name.localeCompare(b.name);
@@ -1424,10 +1840,17 @@ function render() {
       actionHtml = `<button class="bump-btn" onclick="bumpDep('${esc(dep.name)}', '${esc(suggested)}')" title="Review release notes, edit mix.exs: ${esc(dep.constraint)} → ${esc(suggested)}, then mix deps.update ${esc(dep.name)}">${reviewedDeps.has(dep.name) ? `Bump ${suggested}` : 'Review bump'}</button>`;
     } else if (isBlocked) {
       actionHtml = `<button class="info-btn" onclick="showConflictDiagnostics('${esc(dep.name)}')" title="Direct constraint appears to allow latest; analyze the transitive conflict">Review conflict</button>`;
+    } else if (dep.vuln || dep.retired) {
+      // Up to date but flagged — still let the user open the review panel.
+      actionHtml = `<button class="info-btn" onclick="showPackageReview('${esc(dep.name)}')">Review</button>`;
     }
 
+    const flags =
+      (dep.vuln ? `<span class="dep-flag vuln" title="${htmlEscape(dep.vuln.advisory || 'Known vulnerability')}">vuln</span>` : '') +
+      (dep.retired ? `<span class="dep-flag retired" title="${htmlEscape('Retired on Hex: ' + dep.retired.reason)}">retired</span>` : '');
+
     html += `<tr class="dep-row" data-name="${dep.name}">
-      <td><span class="dep-name"><a href="#" class="dep-link" onclick="openUrl('${esc(hexPackageUrl(dep.name))}');return false;">${dep.name}</a>${dep.env ? `<span class="dep-env">(${dep.env})</span>` : ''}</span></td>
+      <td><span class="dep-name"><a href="#" class="dep-link" onclick="openUrl('${esc(hexPackageUrl(dep.name))}');return false;">${dep.name}</a>${dep.env ? `<span class="dep-env">(${dep.env})</span>` : ''}${flags}</span></td>
       <td><span class="ver ver-current">${dep.current}</span></td>
       <td>${renderLatestVer(dep.current, dep.latest, type)}</td>
       <td>${renderConstraint(dep)}</td>
@@ -1458,11 +1881,21 @@ async function refreshData() {
         const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
         if (mixResult.code === 0) mixConstraints = parseMixExsConstraints(mixResult.stdout);
       } catch (_) { mixConstraints = {}; }
-      deps = deps.map(d => ({ ...d, constraint: mixConstraints[d.name] || null }));
-      const outdated = deps.filter(d => d.outdated).length;
-      setTitle(outdated);
+      // Re-attach security flags discovered in the last audit pass.
+      deps = deps.map(d => ({
+        ...d,
+        constraint: mixConstraints[d.name] || null,
+        retired: retiredMap[d.name] || null,
+        vuln: vulnMap[d.name] || null,
+      }));
+      lockCache = null;
+      const outdatedDeps = deps.filter(d => d.outdated);
+      setTitle(outdatedDeps.length);
       const btn = document.getElementById('btn-update-all');
-      if (btn) btn.style.display = outdated > 0 ? 'inline-flex' : 'none';
+      if (btn) btn.style.display = outdatedDeps.length > 0 ? 'inline-flex' : 'none';
+      const safeBtn = document.getElementById('btn-update-safe');
+      const safeCount = outdatedDeps.filter(d => updateType(d.current, d.latest) !== 'major').length;
+      if (safeBtn) safeBtn.style.display = safeCount > 0 ? 'inline-flex' : 'none';
     }
   } catch (_) {}
 }
@@ -1604,6 +2037,92 @@ async function bumpDep(name, newConstraint, reviewed = false) {
   bridge.ui.toast(`${name} bumped to ${newConstraint} and updated`, 'success');
 }
 
+// Update only patch + minor releases — skips major bumps that may break.
+async function updateSafe() {
+  if (loading) return;
+  const safe = deps.filter(d => d.outdated && updateType(d.current, d.latest) !== 'major');
+  if (!safe.length) {
+    bridge.ui.toast('No patch/minor updates available', 'info');
+    return;
+  }
+  const names = safe.map(d => d.name);
+  selectedReview = null;
+  let result;
+  try {
+    result = await runWithProgress(
+      `mix deps.update ${names.map(shellQuote).join(' ')}`,
+      `Updating ${names.length} safe package${names.length > 1 ? 's' : ''} (patch + minor)…`
+    );
+  } catch (e) {
+    bridge.ui.toast(`Error: ${e}`, 'error');
+    render();
+    return;
+  }
+  if (result.timed_out) { bridge.ui.toast('Update timed out', 'error'); render(); return; }
+  if (result.code !== 0) {
+    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
+    setContent(`<div class="error-box">Safe update failed:\n\n${htmlEscape(msg)}</div>`);
+    bridge.ui.toast('Safe update failed', 'error');
+    setTimeout(() => render(), 4000);
+    return;
+  }
+  await refreshData();
+  render();
+  runSecurityAndHousekeeping();
+  bridge.ui.toast('Patch + minor updates applied', 'success');
+}
+
+// Update every package flagged with a known vulnerability to its latest release.
+async function updateVulnerable() {
+  if (loading) return;
+  const names = Object.keys(vulnMap);
+  if (!names.length) return;
+  selectedReview = null;
+  let result;
+  try {
+    result = await runWithProgress(
+      `mix deps.update ${names.map(shellQuote).join(' ')}`,
+      `Updating ${names.length} vulnerable package${names.length > 1 ? 's' : ''}…`
+    );
+  } catch (e) {
+    bridge.ui.toast(`Error: ${e}`, 'error');
+    render();
+    return;
+  }
+  if (result.code !== 0) {
+    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
+    setContent(`<div class="error-box">Vulnerability update failed:\n\n${htmlEscape(msg)}</div>`);
+    bridge.ui.toast('Update failed — a constraint may pin the vulnerable version', 'error');
+    setTimeout(() => render(), 4000);
+    return;
+  }
+  await refreshData();
+  render();
+  runSecurityAndHousekeeping();
+  bridge.ui.toast('Vulnerable packages updated — re-auditing', 'success');
+}
+
+// Remove unused entries from mix.lock.
+async function pruneUnused() {
+  if (loading || !unusedDeps.length) return;
+  const names = unusedDeps.slice();
+  let result;
+  try {
+    result = await bridge.shell.run(`mix deps.unlock ${names.map(shellQuote).join(' ')}`, { timeout: 30000 });
+  } catch (e) {
+    bridge.ui.toast(`Error: ${e}`, 'error');
+    return;
+  }
+  if (result.code !== 0) {
+    bridge.ui.toast('Failed to prune lock', 'error');
+    return;
+  }
+  unusedDeps = [];
+  lockCache = null;
+  render();
+  bridge.ui.toast(`Pruned ${names.length} unused dep${names.length > 1 ? 's' : ''} from mix.lock`, 'success');
+}
+
 async function updateAll() {
   if (loading) return;
   const outdated = deps.filter(d => d.outdated);
@@ -1656,6 +2175,7 @@ async function updateAll() {
 
 document.getElementById('btn-refresh').addEventListener('click', load);
 document.getElementById('btn-update-all').addEventListener('click', updateAll);
+document.getElementById('btn-update-safe').addEventListener('click', updateSafe);
 document.getElementById('btn-toggle-all').addEventListener('click', () => {
   showAll = !showAll;
   document.getElementById('btn-toggle-all').textContent = showAll ? 'Direct only' : 'Show all';
