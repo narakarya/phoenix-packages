@@ -1916,7 +1916,7 @@ async function updateDep(name, reviewed = false) {
 
   let result;
   try {
-    result = await bridge.shell.run(`mix deps.update ${shellQuote(name)}`, { timeout: 120000 });
+    result = await bridge.shell.run(`mix deps.update ${shellQuote(name)} && mix deps.get`, { timeout: 120000 });
   } catch (e) {
     bridge.ui.toast(`Error: ${e}`, 'error');
     render();
@@ -2092,10 +2092,11 @@ function buildUpdateCommand(names) {
   const { direct, transitive } = partitionByDirectness(names);
   const parts = [];
   if (direct.length) parts.push(`mix deps.update ${direct.map(shellQuote).join(' ')}`);
-  if (transitive.length) {
-    parts.push(`mix deps.unlock ${transitive.map(shellQuote).join(' ')}`);
-    parts.push('mix deps.get');
-  }
+  if (transitive.length) parts.push(`mix deps.unlock ${transitive.map(shellQuote).join(' ')}`);
+  // Always re-fetch: deps.update only pulls the direct deps it bumped, so a
+  // trailing deps.get materializes any transitive deps the new lock pulled in
+  // (and resolves the unlocked transitive names above).
+  parts.push('mix deps.get');
   return { cmd: parts.join(' && '), direct, transitive };
 }
 
@@ -2174,7 +2175,7 @@ async function updateAll() {
   let result;
   try {
     result = await runWithProgress(
-      'mix deps.update --all',
+      'mix deps.update --all && mix deps.get',
       `Updating ${outdated.length} package${outdated.length > 1 ? 's' : ''}…`
     );
   } catch (e) {
