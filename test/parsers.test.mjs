@@ -271,3 +271,61 @@ test('retired and vulnerability flags survive the rebuild', () => {
   assert.equal(byName.phoenix.vuln.advisory, 'CVE-1');
   assert.equal(byName.ecto.vuln, null);
 });
+
+// `mix deps.update <pkg> && mix deps.get` streams TWO resolution blocks. The
+// second one re-resolves against the lock the first just wrote, so it reports
+// the freshly-updated package under `Unchanged:` at its NEW version. That is
+// true from deps.get's point of view and false from the run's: the package did
+// move. A later block must not erase a move an earlier block reported.
+test('a trailing deps.get resolution does not erase the update it just performed', () => {
+  const st = newTaskStatus(['phoenix']);
+  feed(st, [
+    'Resolving Hex dependencies...',
+    'Dependency resolution completed:',
+    'Upgraded:',
+    '  phoenix 1.7.10 => 1.7.14',
+    '* Getting phoenix (Hex package)',
+    'Resolving Hex dependencies...',
+    'Dependency resolution completed:',
+    'Unchanged:',
+    '  phoenix 1.7.14',
+  ].join('\n'));
+
+  assert.notEqual(st.status.phoenix.state, 'unchanged');
+  assert.equal(st.status.phoenix.from, '1.7.10');
+  assert.equal(st.status.phoenix.to, '1.7.14');
+});
+
+test('the trailing deps.get block produces no false disagreement in the log', () => {
+  const st = newTaskStatus(['phoenix']);
+  feed(st, [
+    'Resolving Hex dependencies...',
+    'Dependency resolution completed:',
+    'Upgraded:',
+    '  phoenix 1.7.10 => 1.7.14',
+    'Resolving Hex dependencies...',
+    'Dependency resolution completed:',
+    'Unchanged:',
+    '  phoenix 1.7.14',
+  ].join('\n'));
+
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.14' });
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.phoenix.state, 'upgraded');
+  assert.deepEqual(log, []);
+});
+
+test('a target that genuinely did not move is still reported unchanged', () => {
+  const st = newTaskStatus(['ecto']);
+  feed(st, [
+    'Dependency resolution completed:',
+    'Unchanged:',
+    '  ecto 3.11.0',
+  ].join('\n'));
+
+  assert.equal(st.status.ecto.state, 'unchanged');
+  assert.equal(st.status.ecto.from, '3.11.0');
+  assert.equal(st.status.ecto.to, '3.11.0');
+});
