@@ -715,6 +715,92 @@ function parseMixExsConstraints(content) {
   return constraints;
 }
 
+// ── Task progress parsing ─────────────────────────────────────────────────────
+// mix runs one atomic resolution: every per-package outcome arrives inside the
+// "Dependency resolution completed:" block. Pure so it can be tested against
+// captured mix output — see test/parsers.test.mjs.
+
+const RESOLUTION_SECTIONS = {
+  'Unchanged:': 'unchanged',
+  'Upgraded:': 'upgraded',
+  'Downgraded:': 'downgraded',
+  'New:': 'new',
+  'Removed:': 'removed',
+};
+
+function newTaskStatus(targets) {
+  const status = {};
+  for (const name of targets) {
+    status[name] = { state: 'queued', from: null, to: null, extra: false };
+  }
+  return { phase: 'starting', section: null, status, errorLines: [] };
+}
+
+function ensureEntry(st, name) {
+  if (!st.status[name]) {
+    st.status[name] = { state: 'queued', from: null, to: null, extra: true };
+  }
+  return st.status[name];
+}
+
+function parseResolutionLine(line, st) {
+  const trimmed = line.trim();
+
+  if (/^Resolving .* dependencies/.test(trimmed)) {
+    st.phase = 'resolving';
+    for (const e of Object.values(st.status)) {
+      if (e.state === 'queued') e.state = 'resolving';
+    }
+    return st;
+  }
+
+  if (/^Dependency resolution completed/.test(trimmed)) {
+    st.phase = 'resolved';
+    st.section = null;
+    return st;
+  }
+
+  if (RESOLUTION_SECTIONS[trimmed]) {
+    st.section = RESOLUTION_SECTIONS[trimmed];
+    return st;
+  }
+
+  if (trimmed.startsWith('** ')) {
+    st.errorLines.push(trimmed);
+    st.phase = 'failed';
+    return st;
+  }
+
+  const fetching = /^\* (?:Getting|Updating) ([a-z_][a-z0-9_]*)/.exec(trimmed);
+  if (fetching) {
+    ensureEntry(st, fetching[1]).state = 'fetching';
+    st.section = null;
+    return st;
+  }
+
+  // Section entries are indented; the guard stops a stray flush-left line from
+  // being read as a package.
+  if (st.section && /^\s/.test(line)) {
+    const m = /^([a-z_][a-z0-9_]*)\s+(\S+?)(?:\s+=>\s+(\S+))?$/.exec(trimmed);
+    if (m) {
+      const [, name, v1, v2] = m;
+      const e = ensureEntry(st, name);
+      e.state = st.section;
+      if (v2) {
+        e.from = v1;
+        e.to = v2;
+      } else if (st.section === 'new') {
+        e.to = v1;
+      } else {
+        e.from = v1;
+        e.to = v1;
+      }
+    }
+  }
+
+  return st;
+}
+
 // Suggest the tightest safe constraint that allows the latest version.
 // e.g. latest "0.2.0" → "~> 0.2", latest "4.1.0" → "~> 4.1"
 function suggestedConstraint(latest, currentConstraint) {
