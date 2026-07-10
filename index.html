@@ -680,53 +680,57 @@ async function runStream(cmd, onLine, timeoutMs = 120000) {
 async function runTask({ targets, cmd, label, timeoutMs = 300000 }) {
   if (loading) return null;
   loading = true;
-  selectedReview = null;
-
-  const before = versionSnapshot();
-  // A fresh status object per run, always. applyReconciliation() reads each
-  // entry's state as "what the parser claimed this run"; a reused object would
-  // surface last run's outcome as this run's claim.
-  task = newTaskStatus(targets);
-  task.label = label;
-  task.log = [];
-  task.logOpen = false;
-  task.done = false;
-  render();
-
-  let result;
   try {
-    result = await runStream(cmd, (line) => {
-      task.log.push(line);
-      parseResolutionLine(line, task);
-      paintTask();
-    }, timeoutMs);
-  } catch (e) {
-    const msg = String(e?.message || e);
-    task.log.push(msg);
-    result = { code: -1, timed_out: false, stdout: '', stderr: msg };
+    selectedReview = null;
+
+    const before = versionSnapshot();
+    // A fresh status object per run, always. applyReconciliation() reads each
+    // entry's state as "what the parser claimed this run"; a reused object would
+    // surface last run's outcome as this run's claim.
+    task = newTaskStatus(targets);
+    task.label = label;
+    task.log = [];
+    task.logOpen = false;
+    task.done = false;
+    render();
+
+    let result;
+    try {
+      result = await runStream(cmd, (line) => {
+        task.log.push(line);
+        if (line.trim()) task.lastLine = line.trim();
+        parseResolutionLine(line, task);
+        paintTask();
+      }, timeoutMs);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      task.log.push(msg);
+      result = { code: -1, timed_out: false, stdout: '', stderr: msg };
+    }
+
+    let verifyError = null;
+    try {
+      await refreshData();
+    } catch (e) {
+      verifyError = String(e?.message || e);
+    }
+
+    const rec = verifyError ? null : reconcileVersions(before, versionSnapshot(), task.status);
+    applyReconciliation(task, rec, task.log);
+
+    task.done = true;
+    task.code = result.code;
+    task.timedOut = !!result.timed_out;
+    task.verifyError = verifyError;
+    if (result.code !== 0 || result.timed_out || verifyError) task.logOpen = true;
+
+    return { result, rec, verifyError };
+  } finally {
+    loading = false;
+    const ticker = document.getElementById('task-lastline');
+    if (ticker) ticker.style.display = 'none';
+    render();
   }
-
-  let verifyError = null;
-  try {
-    await refreshData();
-  } catch (e) {
-    verifyError = String(e?.message || e);
-  }
-
-  const rec = verifyError ? null : reconcileVersions(before, versionSnapshot(), task.status);
-  applyReconciliation(task, rec, task.log);
-
-  task.done = true;
-  task.code = result.code;
-  task.timedOut = !!result.timed_out;
-  task.verifyError = verifyError;
-  if (result.code !== 0 || result.timed_out || verifyError) task.logOpen = true;
-
-  loading = false;
-  const ticker = document.getElementById('task-lastline');
-  if (ticker) ticker.style.display = 'none';
-  render();
-  return { result, rec, verifyError };
 }
 
 // The only place an update outcome is announced. Counts come from the version
@@ -2087,9 +2091,8 @@ function paintTask() {
   // The log panel only materialises after the run, so this is the live view.
   const ticker = document.getElementById('task-lastline');
   if (ticker) {
-    const last = [...task.log].reverse().find(l => l.trim());
-    ticker.style.display = last ? 'block' : 'none';
-    ticker.textContent = last ? last.trim() : '';
+    ticker.style.display = task.lastLine ? 'block' : 'none';
+    ticker.textContent = task.lastLine || '';
   }
   for (const name of Object.keys(task.status)) {
     const cell = document.getElementById('action-' + name);
@@ -2413,22 +2416,32 @@ async function bumpDep(name, newConstraint, reviewed = false) {
     return;
   }
 
-  const backupResult = await bridge.shell.run('cp mix.exs mix.exs.bump.bak', { timeout: 5000 });
-  if (backupResult.code !== 0) {
-    bridge.ui.toast('Failed to backup mix.exs', 'error');
-    return;
+  // Hold the lock across the mix.exs edit: without it a second action could run
+  // `mix deps.update` against a half-written mix.exs. runTask takes the lock
+  // again itself, so release it immediately before delegating.
+  loading = true;
+  let edited = false;
+  try {
+    const backupResult = await bridge.shell.run('cp mix.exs mix.exs.bump.bak', { timeout: 5000 });
+    if (backupResult.code !== 0) {
+      bridge.ui.toast('Failed to backup mix.exs', 'error');
+      return;
+    }
+    const perlScript = `BEGIN{$n=$ENV{DEP};$c=$ENV{C}}s/(\\{:\\Q$n\\E,\\s*")[^"]+(")/$1$c$2/`;
+    const bumpResult = await bridge.shell.run(
+      `DEP=${shellQuote(name)} C=${shellQuote(newConstraint)} perl -0pi -e '${perlScript}' mix.exs`,
+      { timeout: 5000 },
+    );
+    if (bumpResult.code !== 0) {
+      await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
+      bridge.ui.toast('Failed to edit mix.exs', 'error');
+      return;
+    }
+    edited = true;
+  } finally {
+    loading = false;
   }
-
-  const perlScript = `BEGIN{$n=$ENV{DEP};$c=$ENV{C}}s/(\\{:\\Q$n\\E,\\s*")[^"]+(")/$1$c$2/`;
-  const bumpResult = await bridge.shell.run(
-    `DEP=${shellQuote(name)} C=${shellQuote(newConstraint)} perl -0pi -e '${perlScript}' mix.exs`,
-    { timeout: 5000 },
-  );
-  if (bumpResult.code !== 0) {
-    await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
-    bridge.ui.toast('Failed to edit mix.exs', 'error');
-    return;
-  }
+  if (!edited) return;
 
   const out = await runTask({
     targets: [name],
@@ -2455,7 +2468,12 @@ async function bumpDep(name, newConstraint, reviewed = false) {
   if (out.verifyError) {
     bridge.ui.toast(`Bumped ${name}, but could not verify: ${out.verifyError}`, 'error');
   } else if (movedIt) {
-    bridge.ui.toast(`${name} bumped to ${newConstraint} and updated`, 'success');
+    bridge.ui.toast(
+      out.result.code !== 0
+        ? `${name} bumped to ${newConstraint} and updated, but mix exited with an error`
+        : `${name} bumped to ${newConstraint} and updated`,
+      out.result.code !== 0 ? 'error' : 'success',
+    );
   } else {
     bridge.ui.toast(`${name} constraint bumped, but the version did not move`, 'info');
   }
