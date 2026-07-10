@@ -2543,10 +2543,12 @@ async function updateVulnerable() {
   }
 }
 
-// Remove unused entries from mix.lock.
+// Remove unused entries from mix.lock. Fast enough not to need progress UI,
+// but it changes the lock — so the view must be re-read, not just re-rendered.
 async function pruneUnused() {
   if (loading || !unusedDeps.length) return;
   const names = unusedDeps.slice();
+
   let result;
   try {
     result = await bridge.shell.run(`mix deps.unlock ${names.map(shellQuote).join(' ')}`, { timeout: 30000 });
@@ -2558,9 +2560,18 @@ async function pruneUnused() {
     bridge.ui.toast('Failed to prune lock', 'error');
     return;
   }
+
   unusedDeps = [];
   lockCache = null;
+  try {
+    await refreshData();
+  } catch (e) {
+    bridge.ui.toast(`Pruned, but could not verify: ${e.message}`, 'error');
+    render();
+    return;
+  }
   render();
+  runSecurityAndHousekeeping();
   bridge.ui.toast(`Pruned ${names.length} unused dep${names.length > 1 ? 's' : ''} from mix.lock`, 'success');
 }
 

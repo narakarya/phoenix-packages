@@ -64,6 +64,33 @@ releases are ignored) and replaces any installed extension with the same
 The `version` field below is metadata for display; keep `id` stable so updates
 replace in place.
 
+## Verifying a change
+
+Parser and reconciliation logic is unit-tested:
+
+    node --test test/*.test.mjs
+
+The DOM is not. After touching the update flow, check by hand in Porta against
+a Phoenix app with at least two outdated deps:
+
+- [ ] **Update all** — table stays visible, target rows step through
+      `resolving…` → `fetching…` → `old → new`, non-targets dim, counter climbs.
+- [ ] Toast count equals the number of green rows.
+- [ ] On success the log panel stays closed.
+- [ ] Force a failure (e.g. add an impossible constraint to `mix.exs`) — the log
+      panel opens itself, scrolls to the `** (Mix)` line, and the table remains.
+- [ ] A package that mix reports as upgraded but whose version does not move
+      shows `unchanged`, and the log records the mismatch.
+- [ ] A git or path dependency (no version in `mix.lock`) shows `unverified` rather
+      than a green upgrade, and the log records that it could not be checked.
+- [ ] During a run, the latest `mix` output line appears under the toolbar; it
+      disappears when the run ends.
+- [ ] **Prune from lock** refreshes the list without a manual refresh.
+
+Fixtures in `test/` are hand-authored against mix's documented output shapes.
+When you next run a real update, save its output into a fixture — do not run
+`mix deps.update` against a project just to capture one, it rewrites `mix.lock`.
+
 ## Files
 
 - `porta.json` — extension manifest
