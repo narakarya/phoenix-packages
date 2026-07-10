@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPureFns } from './harness.mjs';
 
-const { newTaskStatus, parseResolutionLine, reconcileVersions, applyReconciliation, expectedState } = loadPureFns([
+const { newTaskStatus, parseResolutionLine, reconcileVersions, applyReconciliation, expectedState, buildDepsFromResults } = loadPureFns([
   'newTaskStatus',
   'parseResolutionLine',
   'reconcileVersions',
   'applyReconciliation',
   'expectedState',
+  'buildDepsFromResults',
 ]);
 
 const feed = (st, text) => {
@@ -204,4 +205,68 @@ test('an unchanged package with a blank parser entry gets its version backfilled
 
   assert.equal(st.status.castore.from, '1.0.8');
   assert.equal(st.status.castore.to, '1.0.8');
+});
+
+const OUTDATED_STDOUT = [
+  'Dependency   Current  Latest   Status',
+  'castore      1.0.8    1.0.8    Up-to-date',
+  'phoenix      1.7.10   1.7.14   Update possible',
+  'ecto         3.11.0   3.12.4   Update not possible',
+].join('\n');
+
+test('exit 1 with stdout is the normal case and must still be parsed', () => {
+  // mix hex.outdated exits 1 whenever anything is outdated. Gating on
+  // code === 0 discarded the result on exactly the runs that changed something.
+  const { deps } = buildDepsFromResults(
+    { code: 1, stdout: OUTDATED_STDOUT, stderr: '' },
+    '',
+    { retiredMap: {}, vulnMap: {} },
+  );
+  const byName = Object.fromEntries(deps.map(d => [d.name, d]));
+
+  assert.equal(deps.length, 3);
+  assert.equal(byName.phoenix.outdated, true);
+  assert.equal(byName.phoenix.latest, '1.7.14');
+  assert.equal(byName.ecto.outdated, false);
+  assert.equal(byName.castore.outdated, false);
+});
+
+test('a non-zero exit with no stdout is a real failure and throws', () => {
+  assert.throws(
+    () => buildDepsFromResults(
+      { code: 1, stdout: '', stderr: '** (Mix) Could not find a Mix project' },
+      '',
+      { retiredMap: {}, vulnMap: {} },
+    ),
+    /Could not find a Mix project/,
+  );
+});
+
+test('constraints from mix.exs are attached to matching deps', () => {
+  const { deps, constraints } = buildDepsFromResults(
+    { code: 1, stdout: OUTDATED_STDOUT, stderr: '' },
+    '{:phoenix, "~> 1.7"},\n{:ecto, "~> 3.11"}',
+    { retiredMap: {}, vulnMap: {} },
+  );
+  const byName = Object.fromEntries(deps.map(d => [d.name, d]));
+
+  assert.equal(constraints.phoenix, '~> 1.7');
+  assert.equal(byName.phoenix.constraint, '~> 1.7');
+  assert.equal(byName.castore.constraint, null);
+});
+
+test('retired and vulnerability flags survive the rebuild', () => {
+  const { deps } = buildDepsFromResults(
+    { code: 1, stdout: OUTDATED_STDOUT, stderr: '' },
+    '',
+    {
+      retiredMap: { castore: { version: '1.0.8', reason: 'security' } },
+      vulnMap: { phoenix: { advisory: 'CVE-1', url: 'https://x' } },
+    },
+  );
+  const byName = Object.fromEntries(deps.map(d => [d.name, d]));
+
+  assert.equal(byName.castore.retired.reason, 'security');
+  assert.equal(byName.phoenix.vuln.advisory, 'CVE-1');
+  assert.equal(byName.ecto.vuln, null);
 });

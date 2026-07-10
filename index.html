@@ -1006,6 +1006,27 @@ function applyReconciliation(st, rec, log) {
   }
 }
 
+// Pure. Turns raw command output into the dependency list.
+//
+// Throws only when the output is genuinely unusable. A non-zero exit WITH
+// stdout is the normal, successful case: mix hex.outdated exits 1 whenever any
+// dependency is outdated.
+function buildDepsFromResults(outdatedResult, mixExsContent, { retiredMap, vulnMap }) {
+  if (outdatedResult.code !== 0 && !outdatedResult.stdout) {
+    throw new Error((outdatedResult.stderr || 'mix hex.outdated failed').trim());
+  }
+
+  const constraints = mixExsContent ? parseMixExsConstraints(mixExsContent) : {};
+  const deps = parseMixOutdated(outdatedResult.stdout).map(d => ({
+    ...d,
+    constraint: constraints[d.name] || null,
+    retired: retiredMap[d.name] || null,
+    vuln: vulnMap[d.name] || null,
+  }));
+
+  return { deps, constraints };
+}
+
 // ── Security audit + housekeeping ───────────────────────────────────────────────
 
 // `mix hex.audit` lists locked packages the maintainer has *retired* (pulled
@@ -2061,32 +2082,41 @@ function esc(s) {
 
 // ── Update ────────────────────────────────────────────────────────────────────
 
+// Snapshot of the currently-known version of every dep, for before/after diffs.
+function versionSnapshot() {
+  const snap = {};
+  for (const d of deps) snap[d.name] = d.current;
+  return snap;
+}
+
+// Re-read dependency state. Throws when the data genuinely cannot be read —
+// callers must say "could not verify" rather than invent a result. All the
+// decision logic lives in buildDepsFromResults(), which is unit-tested.
 async function refreshData() {
+  const cmd = showAll ? 'mix hex.outdated --all' : 'mix hex.outdated';
+  const result = await bridge.shell.run(cmd, { timeout: 120000 });
+
+  let mixExsContent = '';
   try {
-    const result = await bridge.shell.run(showAll ? 'mix hex.outdated --all' : 'mix hex.outdated', { timeout: 120000 });
-    if (result.code === 0 && result.stdout) {
-      deps = parseMixOutdated(result.stdout);
-      try {
-        const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
-        if (mixResult.code === 0) mixConstraints = parseMixExsConstraints(mixResult.stdout);
-      } catch (_) { mixConstraints = {}; }
-      // Re-attach security flags discovered in the last audit pass.
-      deps = deps.map(d => ({
-        ...d,
-        constraint: mixConstraints[d.name] || null,
-        retired: retiredMap[d.name] || null,
-        vuln: vulnMap[d.name] || null,
-      }));
-      lockCache = null;
-      const outdatedDeps = deps.filter(d => d.outdated);
-      setTitle(outdatedDeps.length);
-      const btn = document.getElementById('btn-update-all');
-      if (btn) btn.style.display = outdatedDeps.length > 0 ? 'inline-flex' : 'none';
-      const safeBtn = document.getElementById('btn-update-safe');
-      const safeCount = outdatedDeps.filter(d => updateType(d.current, d.latest) !== 'major').length;
-      if (safeBtn) safeBtn.style.display = safeCount > 0 ? 'inline-flex' : 'none';
-    }
-  } catch (_) {}
+    const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
+    if (mixResult.code === 0) mixExsContent = mixResult.stdout;
+  } catch (_) {
+    mixExsContent = '';
+  }
+
+  const built = buildDepsFromResults(result, mixExsContent, { retiredMap, vulnMap });
+  deps = built.deps;
+  mixConstraints = built.constraints;
+
+  lockCache = null;
+  const outdatedDeps = deps.filter(d => d.outdated);
+  setTitle(outdatedDeps.length);
+
+  const btn = document.getElementById('btn-update-all');
+  if (btn) btn.style.display = outdatedDeps.length > 0 ? 'inline-flex' : 'none';
+  const safeBtn = document.getElementById('btn-update-safe');
+  const safeCount = outdatedDeps.filter(d => updateType(d.current, d.latest) !== 'major').length;
+  if (safeBtn) safeBtn.style.display = safeCount > 0 ? 'inline-flex' : 'none';
 }
 
 async function updateDep(name, reviewed = false) {
