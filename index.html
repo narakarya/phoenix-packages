@@ -575,6 +575,14 @@ button.info-btn {
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }
+.task-status { font-size: 10px; font-family: monospace; }
+.task-status.ok { color: var(--green); }
+.task-status.warn { color: var(--amber); }
+.task-status.err { color: var(--red); }
+.task-status.muted { color: var(--text-muted); }
+.task-status.queued { color: var(--text-muted); }
+tr.dep-row.dimmed { opacity: 0.35; }
+#task-counter { font-size: 11px; color: var(--text-dim); margin-left: auto; }
 </style>
 </head>
 <body>
@@ -586,6 +594,7 @@ button.info-btn {
   <button id="btn-update-all" class="primary" style="display:none">
     Update all outdated
   </button>
+  <span id="task-counter" style="display:none"></span>
   <button id="btn-toggle-all">Show all</button>
   <button id="btn-refresh">
     <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
@@ -608,6 +617,7 @@ const bridge = window.__portaBridge;
 
 let deps = [];
 let loading = false;
+let task = null; // { phase, section, status, errorLines, log, logOpen, label, done, code, timedOut, verifyError }
 let showAll = false;
 let mixConstraints = {}; // { depName: "~> x.y" }
 let selectedReview = null;
@@ -1954,6 +1964,48 @@ async function runSecurityAndHousekeeping() {
   render();
 }
 
+function taskCounterText() {
+  if (!task) return '';
+  const entries = Object.values(task.status);
+  const settled = entries.filter(e =>
+    ['upgraded', 'downgraded', 'changed', 'new', 'unchanged', 'removed', 'unverified', 'failed'].includes(e.state)).length;
+  return `${settled}/${entries.length}`;
+}
+
+function renderRowStatus(name) {
+  const e = task?.status?.[name];
+  if (!e) return '';
+  switch (e.state) {
+    case 'queued':     return '<span class="task-status queued">queued</span>';
+    case 'resolving':  return '<span class="updating-indicator"><span class="mini-spinner"></span>resolving…</span>';
+    case 'fetching':   return '<span class="updating-indicator"><span class="mini-spinner"></span>fetching…</span>';
+    case 'upgraded':   return `<span class="task-status ok">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
+    case 'downgraded': return `<span class="task-status warn">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
+    case 'changed':    return `<span class="task-status muted">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
+    case 'new':        return `<span class="task-status ok">new ${htmlEscape(e.to)}</span>`;
+    case 'unchanged':  return '<span class="task-status muted">unchanged</span>';
+    case 'removed':    return '<span class="task-status muted">removed</span>';
+    case 'unverified': return '<span class="task-status warn" title="mix.lock records no version for this dep (git or path), so the result could not be checked">unverified</span>';
+    case 'failed':     return '<span class="task-status err">failed</span>';
+    default:           return '';
+  }
+}
+
+// Patch only what changed. A full render() here would destroy scroll position
+// and any open review panel on every streamed line.
+function paintTask() {
+  if (!task) return;
+  const counter = document.getElementById('task-counter');
+  if (counter) {
+    counter.style.display = 'inline';
+    counter.textContent = `${task.label} ${taskCounterText()}`;
+  }
+  for (const name of Object.keys(task.status)) {
+    const cell = document.getElementById('action-' + name);
+    if (cell) cell.innerHTML = renderRowStatus(name);
+  }
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function renderBanners() {
@@ -1986,6 +2038,8 @@ function renderBanners() {
 function render() {
   const outdated = deps.filter(d => d.outdated);
   const blocked  = deps.filter(d => !d.outdated && d.current !== d.latest);
+  const counter = document.getElementById('task-counter');
+  if (counter) counter.style.display = task ? 'inline' : 'none';
   let html = '';
 
   html += renderBanners();
@@ -2040,7 +2094,9 @@ function render() {
     const suggested = isBlocked && directAllowsLatest !== true ? suggestedConstraint(dep.latest, dep.constraint) : null;
 
     let actionHtml = '';
-    if (dep.outdated) {
+    if (task && task.status[dep.name]) {
+      actionHtml = renderRowStatus(dep.name);
+    } else if (dep.outdated) {
       if (type === 'major' && !reviewedDeps.has(dep.name)) {
         actionHtml = `<button class="info-btn" onclick="showPackageReview('${esc(dep.name)}')">Review</button>`;
       } else {
@@ -2059,7 +2115,8 @@ function render() {
       (dep.vuln ? `<span class="dep-flag vuln" title="${htmlEscape(dep.vuln.advisory || 'Known vulnerability')}">vuln</span>` : '') +
       (dep.retired ? `<span class="dep-flag retired" title="${htmlEscape('Retired on Hex: ' + dep.retired.reason)}">retired</span>` : '');
 
-    html += `<tr class="dep-row" data-name="${dep.name}">
+    const dimmed = task && !task.status[dep.name] ? ' dimmed' : '';
+    html += `<tr class="dep-row${dimmed}" data-name="${dep.name}">
       <td><span class="dep-name"><a href="#" class="dep-link" onclick="openUrl('${esc(hexPackageUrl(dep.name))}');return false;">${dep.name}</a>${dep.env ? `<span class="dep-env">(${dep.env})</span>` : ''}${flags}</span></td>
       <td><span class="ver ver-current">${dep.current}</span></td>
       <td>${renderLatestVer(dep.current, dep.latest, type)}</td>
