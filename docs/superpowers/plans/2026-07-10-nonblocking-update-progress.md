@@ -371,48 +371,128 @@ git commit -m "feat: reconcile per-package status against actual version diff"
 ### Task 3: Fix refreshData's exit-code bug
 
 **Files:**
-- Modify: `index.html:1875-1901` (`refreshData`)
+- Modify: `index.html` — append to the task-progress block (pure part); rewrite `refreshData()` (line ~1875-1901)
 - Modify: `test/parsers.test.mjs`
 
 **Interfaces:**
-- Consumes: `parseMixOutdated` (existing).
+- Consumes: `parseMixOutdated`, `parseMixExsConstraints` (existing).
 - Produces:
-  - `refreshData()` now **throws** on genuine failure instead of silently returning. Every caller must handle it.
+  - `buildDepsFromResults(outdatedResult, mixExsContent, flags) → {deps, constraints}` — pure; **throws** when the output is unusable
+  - `refreshData()` — thin I/O shell around it; now **throws** on genuine failure instead of silently returning. Every caller must handle it.
   - `versionSnapshot() → {[name]: string}` — current version of each known dep.
 
 This is the single highest-value change in the plan. `mix hex.outdated` exits 1 whenever anything is outdated, so the old `if (result.code === 0 && result.stdout)` guard made `refreshData()` a no-op on exactly the runs where it mattered — leaving `deps` stale and every toast computed from pre-update data.
 
-- [ ] **Step 1: Write the failing test**
+`refreshData()` cannot be unit-tested as written: it reaches for `bridge`, `document`, and six module globals. So the decision logic — *is this output usable, and what deps does it describe* — moves into a pure function, and `refreshData()` keeps only the I/O. The pure function is what gets the failing test.
 
-Append to `test/parsers.test.mjs` (add `parseMixOutdated` to the `loadPureFns([...])` array):
+- [ ] **Step 1: Write the failing tests**
+
+Append to `test/parsers.test.mjs` (add `buildDepsFromResults` to the `loadPureFns([...])` array):
 
 ```js
-test('hex.outdated stdout parses even when the command exits 1', () => {
-  // mix hex.outdated exits 1 whenever anything is outdated. The stdout that
-  // accompanies that exit is valid and must be parsed, not discarded.
-  const stdout = [
-    'Dependency   Current  Latest   Status',
-    'castore      1.0.8    1.0.8    Up-to-date',
-    'phoenix      1.7.10   1.7.14   Update possible',
-    'ecto         3.11.0   3.12.4   Update not possible',
-  ].join('\n');
+const OUTDATED_STDOUT = [
+  'Dependency   Current  Latest   Status',
+  'castore      1.0.8    1.0.8    Up-to-date',
+  'phoenix      1.7.10   1.7.14   Update possible',
+  'ecto         3.11.0   3.12.4   Update not possible',
+].join('\n');
 
-  const deps = parseMixOutdated(stdout);
+test('exit 1 with stdout is the normal case and must still be parsed', () => {
+  // mix hex.outdated exits 1 whenever anything is outdated. Gating on
+  // code === 0 discarded the result on exactly the runs that changed something.
+  const { deps } = buildDepsFromResults(
+    { code: 1, stdout: OUTDATED_STDOUT, stderr: '' },
+    '',
+    { retiredMap: {}, vulnMap: {} },
+  );
   const byName = Object.fromEntries(deps.map(d => [d.name, d]));
 
+  assert.equal(deps.length, 3);
   assert.equal(byName.phoenix.outdated, true);
+  assert.equal(byName.phoenix.latest, '1.7.14');
   assert.equal(byName.ecto.outdated, false);
   assert.equal(byName.castore.outdated, false);
-  assert.equal(byName.phoenix.latest, '1.7.14');
+});
+
+test('a non-zero exit with no stdout is a real failure and throws', () => {
+  assert.throws(
+    () => buildDepsFromResults(
+      { code: 1, stdout: '', stderr: '** (Mix) Could not find a Mix project' },
+      '',
+      { retiredMap: {}, vulnMap: {} },
+    ),
+    /Could not find a Mix project/,
+  );
+});
+
+test('constraints from mix.exs are attached to matching deps', () => {
+  const { deps, constraints } = buildDepsFromResults(
+    { code: 1, stdout: OUTDATED_STDOUT, stderr: '' },
+    '{:phoenix, "~> 1.7"},\n{:ecto, "~> 3.11"}',
+    { retiredMap: {}, vulnMap: {} },
+  );
+  const byName = Object.fromEntries(deps.map(d => [d.name, d]));
+
+  assert.equal(constraints.phoenix, '~> 1.7');
+  assert.equal(byName.phoenix.constraint, '~> 1.7');
+  assert.equal(byName.castore.constraint, null);
+});
+
+test('retired and vulnerability flags survive the rebuild', () => {
+  const { deps } = buildDepsFromResults(
+    { code: 1, stdout: OUTDATED_STDOUT, stderr: '' },
+    '',
+    {
+      retiredMap: { castore: { version: '1.0.8', reason: 'security' } },
+      vulnMap: { phoenix: { advisory: 'CVE-1', url: 'https://x' } },
+    },
+  );
+  const byName = Object.fromEntries(deps.map(d => [d.name, d]));
+
+  assert.equal(byName.castore.retired.reason, 'security');
+  assert.equal(byName.phoenix.vuln.advisory, 'CVE-1');
+  assert.equal(byName.ecto.vuln, null);
 });
 ```
 
-- [ ] **Step 2: Run test to verify it passes already**
+- [ ] **Step 2: Run tests to verify they fail**
 
 Run: `node --test test/`
-Expected: PASS. `parseMixOutdated` is already correct — the bug is in its **caller**, which never hands it this stdout. This test pins the contract that the next step relies on. Do not skip it.
+Expected: FAIL, 4 new tests, each with `TypeError: buildDepsFromResults is not a function`.
 
-- [ ] **Step 3: Rewrite refreshData**
+- [ ] **Step 3: Implement the pure core**
+
+Append to the task-progress block in `index.html`:
+
+```js
+// Pure. Turns raw command output into the dependency list.
+//
+// Throws only when the output is genuinely unusable. A non-zero exit WITH
+// stdout is the normal, successful case: mix hex.outdated exits 1 whenever any
+// dependency is outdated.
+function buildDepsFromResults(outdatedResult, mixExsContent, { retiredMap, vulnMap }) {
+  if (outdatedResult.code !== 0 && !outdatedResult.stdout) {
+    throw new Error((outdatedResult.stderr || 'mix hex.outdated failed').trim());
+  }
+
+  const constraints = mixExsContent ? parseMixExsConstraints(mixExsContent) : {};
+  const deps = parseMixOutdated(outdatedResult.stdout).map(d => ({
+    ...d,
+    constraint: constraints[d.name] || null,
+    retired: retiredMap[d.name] || null,
+    vuln: vulnMap[d.name] || null,
+  }));
+
+  return { deps, constraints };
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `node --test test/`
+Expected: PASS, 13 tests.
+
+- [ ] **Step 5: Rewrite refreshData as a thin I/O shell**
 
 Replace `refreshData()` in `index.html` in full:
 
@@ -425,33 +505,23 @@ function versionSnapshot() {
 }
 
 // Re-read dependency state. Throws when the data genuinely cannot be read —
-// callers must say "could not verify" rather than invent a result.
-//
-// mix hex.outdated exits 1 whenever any dep is outdated, so a non-zero exit
-// with stdout is the normal, successful case. This mirrors load().
+// callers must say "could not verify" rather than invent a result. All the
+// decision logic lives in buildDepsFromResults(), which is unit-tested.
 async function refreshData() {
   const cmd = showAll ? 'mix hex.outdated --all' : 'mix hex.outdated';
   const result = await bridge.shell.run(cmd, { timeout: 120000 });
 
-  if (result.code !== 0 && !result.stdout) {
-    throw new Error((result.stderr || 'mix hex.outdated failed').trim());
-  }
-
-  deps = parseMixOutdated(result.stdout);
-
+  let mixExsContent = '';
   try {
     const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
-    if (mixResult.code === 0) mixConstraints = parseMixExsConstraints(mixResult.stdout);
+    if (mixResult.code === 0) mixExsContent = mixResult.stdout;
   } catch (_) {
-    mixConstraints = {};
+    mixExsContent = '';
   }
 
-  deps = deps.map(d => ({
-    ...d,
-    constraint: mixConstraints[d.name] || null,
-    retired: retiredMap[d.name] || null,
-    vuln: vulnMap[d.name] || null,
-  }));
+  const built = buildDepsFromResults(result, mixExsContent, { retiredMap, vulnMap });
+  deps = built.deps;
+  mixConstraints = built.constraints;
 
   lockCache = null;
   const outdatedDeps = deps.filter(d => d.outdated);
@@ -465,17 +535,17 @@ async function refreshData() {
 }
 ```
 
-- [ ] **Step 4: Verify no caller is left assuming refreshData swallows errors**
+- [ ] **Step 6: Verify no caller is left assuming refreshData swallows errors**
 
 Run: `grep -n "refreshData()" index.html`
-Expected: five call sites (`updateDep`, `updateTogether`, `bumpDep`, `updateSafe`, `updateVulnerable`, `updateAll`). They are rewritten in Task 6; leave them for now. Confirm none of them wraps `refreshData()` in a `try` that discards the error — they currently do not.
+Expected: six call sites (`updateDep`, `updateTogether`, `bumpDep`, `updateSafe`, `updateVulnerable`, `updateAll`). They are rewritten in Task 6; leave them for now. Confirm none of them wraps `refreshData()` in a `try` that discards the error — they currently do not.
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 7: Run tests**
 
 Run: `node --test test/`
-Expected: PASS, 10 tests.
+Expected: PASS, 13 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add index.html test/parsers.test.mjs
@@ -621,7 +691,7 @@ Finally, hide the counter when no task is active. At the top of `render()`, afte
 There is no DOM test. In Porta, open the extension on a Phoenix app with outdated deps. Nothing should look different yet — `task` is always `null` until Task 6 wires it up. Confirm the table renders exactly as before and no console errors appear.
 
 Run: `node --test test/`
-Expected: PASS, 10 tests (no regressions).
+Expected: PASS, 13 tests (no regressions).
 
 - [ ] **Step 6: Commit**
 
@@ -751,7 +821,7 @@ Replace with:
 - [ ] **Step 4: Verify**
 
 Run: `node --test test/`
-Expected: PASS, 10 tests. The panel is still unreachable (`task` stays `null`); Task 6 wires it.
+Expected: PASS, 13 tests. The panel is still unreachable (`task` stays `null`); Task 6 wires it.
 
 - [ ] **Step 5: Commit**
 
@@ -1044,7 +1114,7 @@ Run: `grep -n "prevCount\|nowOutdated" index.html`
 Expected: no output.
 
 Run: `node --test test/`
-Expected: PASS, 10 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 7: Manual verification in Porta**
 
@@ -1147,7 +1217,7 @@ When you next run a real update, save its output into a fixture — do not run
 - [ ] **Step 3: Run tests**
 
 Run: `node --test test/`
-Expected: PASS, 10 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 4: Commit**
 
