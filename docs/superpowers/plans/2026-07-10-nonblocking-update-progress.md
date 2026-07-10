@@ -18,6 +18,23 @@
 - All pure functions under test MUST live between the `// ── Parsers` and `// ── Security audit` markers in `index.html`. That block is currently function declarations only, with no top-level side effects. Keep it that way.
 - Never run `mix deps.update` against one of the user's real projects to capture fixtures — it mutates `mix.lock`.
 - The test command is `node --test test/*.test.mjs`. Do NOT use `node --test test/` — on Node 25 a directory argument is treated as an entry module and the run dies with MODULE_NOT_FOUND. Bare `node --test` works but also runs `harness.mjs` as an empty test file.
+- Per-package `state` is one of: `queued`, `resolving`, `fetching`, `upgraded`, `downgraded`, `changed`, `new`, `unchanged`, `removed`, `unverified`, `failed`. Anything that renders or counts a state MUST handle all of them.
+
+## Amendments made during execution
+
+Task 2's code as written below is superseded by what shipped; two review rounds
+found it claimed outcomes it could not prove. Consult `index.html` over this
+document for `reconcileVersions` / `applyReconciliation`. What changed:
+
+- `rec.unchanged` carries `{name, version}`, not a bare name string, so
+  reconciliation can backfill `from`/`to` on the majority (unchanged) case.
+- `applyReconciliation` iterates every package in `st.status`, not only those
+  the version diff bucketed. Git and path deps have no version in `mix.lock`,
+  so a false parser claim about them used to survive unchecked; they now render
+  `unverified` and the disagreement is logged.
+- `compareVersions` reads three numeric segments, so a prerelease bump
+  (`1.7.10-rc.1` → `1.7.10-rc.2`) compares equal while the strings differ. That
+  case is `changed`, not `downgraded`.
 
 ---
 
@@ -610,7 +627,7 @@ function taskCounterText() {
   if (!task) return '';
   const entries = Object.values(task.status);
   const settled = entries.filter(e =>
-    ['upgraded', 'downgraded', 'new', 'unchanged', 'removed', 'failed'].includes(e.state)).length;
+    ['upgraded', 'downgraded', 'changed', 'new', 'unchanged', 'removed', 'unverified', 'failed'].includes(e.state)).length;
   return `${settled}/${entries.length}`;
 }
 
@@ -623,9 +640,11 @@ function renderRowStatus(name) {
     case 'fetching':   return '<span class="updating-indicator"><span class="mini-spinner"></span>fetching…</span>';
     case 'upgraded':   return `<span class="task-status ok">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
     case 'downgraded': return `<span class="task-status warn">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
+    case 'changed':    return `<span class="task-status muted">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
     case 'new':        return `<span class="task-status ok">new ${htmlEscape(e.to)}</span>`;
     case 'unchanged':  return '<span class="task-status muted">unchanged</span>';
     case 'removed':    return '<span class="task-status muted">removed</span>';
+    case 'unverified': return '<span class="task-status warn" title="mix.lock records no version for this dep (git or path), so the result could not be checked">unverified</span>';
     case 'failed':     return '<span class="task-status err">failed</span>';
     default:           return '';
   }
