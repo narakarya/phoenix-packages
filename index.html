@@ -919,6 +919,10 @@ function reconcileVersions(before, after, status) {
     const b = before[name];
     const a = after[name];
 
+    // A name with neither a before nor an after version carries no version
+    // data to reconcile (e.g. status-only entries for packages the resolver
+    // never touched) — it falls through every branch below and is dropped
+    // intentionally, not by omission.
     if (b && a && b !== a) moved.push({ name, from: b, to: a });
     else if (a && !b) added.push({ name, to: a });
     else if (b && !a) removed.push({ name, from: b });
@@ -934,19 +938,54 @@ function reconcileVersions(before, after, status) {
   return { moved, unchanged, added, removed, mismatches };
 }
 
+// The state a package's row SHOULD show, derived purely from the version diff.
+// Returns null when the diff carries no information about it.
+function expectedState(name, rec) {
+  const moved = rec.moved.find(m => m.name === name);
+  if (moved) return compareVersions(moved.from, moved.to) < 0 ? 'upgraded' : 'downgraded';
+  if (rec.added.some(a => a.name === name)) return 'new';
+  if (rec.removed.some(r => r.name === name)) return 'removed';
+  if (rec.unchanged.includes(name)) return 'unchanged';
+  return null;
+}
+
+// States the parser can assert as final. A disagreement between one of these
+// and the version diff is worth recording — anything else is just a package
+// the stream never got around to reporting.
+const SETTLED_STATES = ['upgraded', 'downgraded', 'new', 'unchanged', 'removed'];
+
 // Rewrite per-package state to match the version diff, and record every place
-// the parser and reality disagreed.
+// the parser and reality disagreed. Reality always wins: mix's output format is
+// not a contract, and its exit code says nothing about which packages moved.
 function applyReconciliation(st, rec, log) {
   if (!rec) return;
-  for (const m of rec.moved) {
-    const e = ensureEntry(st, m.name);
-    e.state = 'upgraded';
-    e.from = m.from;
-    e.to = m.to;
-  }
-  for (const mm of rec.mismatches) {
-    ensureEntry(st, mm.name).state = 'unchanged';
-    log.push(`[porta] ${mm.name}: mix reported ${mm.claimed} but the version did not move — showing unchanged`);
+  const names = new Set([
+    ...rec.moved.map(m => m.name),
+    ...rec.added.map(a => a.name),
+    ...rec.removed.map(r => r.name),
+    ...rec.unchanged,
+  ]);
+
+  for (const name of names) {
+    const expected = expectedState(name, rec);
+    if (!expected) continue;
+    const e = ensureEntry(st, name);
+    const claimed = e.state;
+
+    const moved = rec.moved.find(m => m.name === name);
+    const added = rec.added.find(a => a.name === name);
+    const removed = rec.removed.find(r => r.name === name);
+    if (moved) { e.from = moved.from; e.to = moved.to; }
+    else if (added) { e.from = null; e.to = added.to; }
+    else if (removed) { e.from = removed.from; e.to = null; }
+    // unchanged: leave from/to alone only if they agree; otherwise clear the lie
+    else if (e.from !== e.to) { e.to = e.from; }
+
+    e.state = expected;
+
+    if (SETTLED_STATES.includes(claimed) && claimed !== expected) {
+      log.push(`[porta] ${name}: mix reported ${claimed} but the version diff says ${expected}`);
+    }
   }
 }
 

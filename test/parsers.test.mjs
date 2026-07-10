@@ -2,10 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPureFns } from './harness.mjs';
 
-const { newTaskStatus, parseResolutionLine, reconcileVersions } = loadPureFns([
+const { newTaskStatus, parseResolutionLine, reconcileVersions, applyReconciliation, expectedState } = loadPureFns([
   'newTaskStatus',
   'parseResolutionLine',
   'reconcileVersions',
+  'applyReconciliation',
+  'expectedState',
 ]);
 
 const feed = (st, text) => {
@@ -94,4 +96,61 @@ test('packages appearing only after the run are reported as added', () => {
 test('packages gone after the run are reported as removed', () => {
   const rec = reconcileVersions({ old_dep: '0.1.0' }, {}, { old_dep: { state: 'removed' } });
   assert.deepEqual(rec.removed, [{ name: 'old_dep', from: '0.1.0' }]);
+});
+
+test('a real downgrade ends downgraded, not upgraded, with correct from/to', () => {
+  const st = newTaskStatus(['phoenix']);
+  st.status.phoenix = { state: 'queued', from: null, to: null, extra: false };
+  const rec = reconcileVersions({ phoenix: '1.7.14' }, { phoenix: '1.7.10' }, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.phoenix.state, 'downgraded');
+  assert.equal(st.status.phoenix.from, '1.7.14');
+  assert.equal(st.status.phoenix.to, '1.7.10');
+});
+
+test('a real upgrade ends upgraded with correct from/to', () => {
+  const st = newTaskStatus(['phoenix']);
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.14' }, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.phoenix.state, 'upgraded');
+  assert.equal(st.status.phoenix.from, '1.7.10');
+  assert.equal(st.status.phoenix.to, '1.7.14');
+});
+
+test('a false upgraded claim on an unmoved package is corrected to unchanged, from equals to, and logs once', () => {
+  const st = newTaskStatus(['phoenix']);
+  st.status.phoenix = { state: 'upgraded', from: '1.7.10', to: '1.7.14', extra: false };
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' }, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.phoenix.state, 'unchanged');
+  assert.equal(st.status.phoenix.from, st.status.phoenix.to);
+  assert.equal(log.length, 1);
+});
+
+test('a false new claim on an unchanged package is corrected to unchanged and logged', () => {
+  const st = newTaskStatus(['phoenix']);
+  st.status.phoenix = { state: 'new', from: null, to: '1.7.10', extra: false };
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' }, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.phoenix.state, 'unchanged');
+  assert.equal(log.length, 1);
+});
+
+test('a package the parser never settled is reconciled silently when it actually moved', () => {
+  const st = newTaskStatus(['phoenix']);
+  // st.status.phoenix.state stays 'queued' — the stream never reported it.
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.14' }, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.phoenix.state, 'upgraded');
+  assert.equal(log.length, 0);
 });
