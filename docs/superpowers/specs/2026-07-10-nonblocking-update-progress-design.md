@@ -104,8 +104,13 @@ fix.
 Every line is also appended verbatim to `task.log`.
 
 Packages that appear in the resolution block but are **not** in `targets`
-(transitive deps that moved along) are added to the table as new rows during
-reconciliation, not silently dropped.
+(transitive deps that moved along) are not added to the table: `deps` — and
+therefore every row `render()` draws — comes only from `mix hex.outdated`,
+which in its default direct-only view does not list them. Such a package
+gets no row and no before/after version to check its claim against;
+reconciliation marks it `unverified` and writes one log line saying so. In
+`Show all` mode (`mix hex.outdated --all`) the package is listed and gets an
+ordinary row like any other.
 
 ### 3. Reconciliation is the source of truth
 

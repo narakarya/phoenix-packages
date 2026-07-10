@@ -666,7 +666,7 @@ function paintTask() {
 }
 ```
 
-Note: packages discovered mid-stream that have no row yet (transitive `extra` entries) simply have no cell to patch. They appear as rows on the next full `render()` after reconciliation. That is intended.
+Note: packages discovered mid-stream that have no row yet (transitive deps the parser saw move but that were never in `targets`) simply have no cell to patch. They never get a row: `deps`, and therefore every row `render()` draws, comes only from `mix hex.outdated`, which in its default direct-only view does not list them. Reconciliation still records the outcome — such a package is marked `unverified` with a log line, since there is no before/after version to check its claim against. In `Show all` mode (`mix hex.outdated --all`) it is listed and gets an ordinary row.
 
 - [ ] **Step 4: Teach render() about an active task**
 
@@ -1265,8 +1265,8 @@ git commit -m "fix: prune unused refreshes deps; document manual checks"
 | §5 Tests | 1, 2, 3 |
 | Per-row status, dimming, counter | 4 |
 
-Every spec section maps to a task. The spec's "transitive package appears in the block but absent from targets" case is Task 1's `extra` flag test; such rows surface on the post-reconciliation `render()`.
+Every spec section maps to a task. The spec's "transitive package appears in the block but absent from targets" case is covered by Task 1's parser test for a package the caller never targeted; such a package gets no row (`deps` comes only from `mix hex.outdated`, which omits it in the default direct-only view) and is marked `unverified` by reconciliation, with one log line explaining why.
 
-**Type consistency:** `status` entries are `{state, from, to, extra}` throughout Tasks 1, 2, 4, 6. `reconcileVersions` returns `{moved, unchanged, added, removed, mismatches}` and only `moved` and `mismatches` are consumed (Tasks 2, 6). `runTask` returns `{result, rec, verifyError}`; `summariseTask(rec, verifyError)` matches its call sites. `ensureEntry(st, name)` takes the task-status object in both Task 1 and Task 2 (`applyReconciliation` passes `st`, not `st.status`).
+**Type consistency:** `status` entries are `{state, from, to}` throughout Tasks 1, 2, 4, 6. `reconcileVersions` returns `{moved, unchanged, added, removed}`, and `added`, `removed`, and `unchanged` are all consumed by `expectedState` alongside `moved` (Tasks 2, 6). `runTask` returns `{result, rec, verifyError}`; `summariseTask(rec, verifyError)` matches its call sites. `ensureEntry(st, name)` takes the task-status object in both Task 1 and Task 2 (`applyReconciliation` passes `st`, not `st.status`).
 
 **Known deliberate gaps:** DOM behaviour is verified by the README checklist, not tests. No cancel button (no kill channel exists). Fixtures are hand-authored, not captured.

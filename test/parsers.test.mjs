@@ -30,10 +30,9 @@ test('resolution block fills upgraded, unchanged, and new packages', () => {
     '  telemetry 1.2.1',
   ].join('\n'));
 
-  assert.equal(st.phase, 'resolved');
-  assert.deepEqual(st.status.phoenix, { state: 'upgraded', from: '1.7.10', to: '1.7.14', extra: false });
-  assert.deepEqual(st.status.ecto, { state: 'upgraded', from: '3.11.0', to: '3.12.4', extra: false });
-  assert.deepEqual(st.status.castore, { state: 'unchanged', from: '1.0.8', to: '1.0.8', extra: false });
+  assert.deepEqual(st.status.phoenix, { state: 'upgraded', from: '1.7.10', to: '1.7.14' });
+  assert.deepEqual(st.status.ecto, { state: 'upgraded', from: '3.11.0', to: '3.12.4' });
+  assert.deepEqual(st.status.castore, { state: 'unchanged', from: '1.0.8', to: '1.0.8' });
 });
 
 test('targets enter resolving as soon as resolution starts', () => {
@@ -43,7 +42,7 @@ test('targets enter resolving as soon as resolution starts', () => {
   assert.equal(st.status.phoenix.state, 'resolving');
 });
 
-test('a package absent from targets is recorded and flagged extra', () => {
+test('a package the parser names but the caller never targeted is still recorded', () => {
   const st = newTaskStatus(['phoenix']);
   feed(st, [
     'Dependency resolution completed:',
@@ -52,8 +51,10 @@ test('a package absent from targets is recorded and flagged extra', () => {
   ].join('\n'));
 
   assert.equal(st.status.plug.state, 'upgraded');
-  assert.equal(st.status.plug.extra, true);
-  assert.equal(st.status.phoenix.extra, false);
+  assert.equal(st.status.plug.from, '1.15.0');
+  assert.equal(st.status.plug.to, '1.16.1');
+  // phoenix was targeted but never mentioned in the block — it stays queued.
+  assert.equal(st.status.phoenix.state, 'queued');
 });
 
 test('Getting and Updating lines move a package into fetching', () => {
@@ -62,18 +63,17 @@ test('Getting and Updating lines move a package into fetching', () => {
   assert.equal(st.status.phoenix.state, 'fetching');
 });
 
-test('mix error lines are captured and mark the task failed', () => {
+test('a mix error line does not corrupt package state', () => {
   const st = newTaskStatus(['phoenix']);
   feed(st, '** (Mix) Dependency resolution failed');
-  assert.equal(st.phase, 'failed');
-  assert.equal(st.errorLines.length, 1);
+
+  assert.equal(st.status.phoenix.state, 'queued');
 });
 
 test('moved packages are detected from the version diff', () => {
   const rec = reconcileVersions(
     { phoenix: '1.7.10', castore: '1.0.8' },
     { phoenix: '1.7.14', castore: '1.0.8' },
-    {},
   );
   assert.deepEqual(rec.moved, [{ name: 'phoenix', from: '1.7.10', to: '1.7.14' }]);
   assert.deepEqual(rec.unchanged, [{ name: 'castore', version: '1.0.8' }]);
@@ -81,28 +81,30 @@ test('moved packages are detected from the version diff', () => {
 
 test('reality overrides a parser that claimed an upgrade that did not happen', () => {
   const st = newTaskStatus(['phoenix']);
-  st.status.phoenix = { state: 'upgraded', from: '1.7.10', to: '1.7.14', extra: false };
+  st.status.phoenix = { state: 'upgraded', from: '1.7.10', to: '1.7.14' };
 
-  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' }, st.status);
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' });
+  const log = [];
+  applyReconciliation(st, rec, log);
 
-  assert.deepEqual(rec.moved, []);
-  assert.deepEqual(rec.mismatches, [{ name: 'phoenix', claimed: 'upgraded', actual: '1.7.10' }]);
+  assert.equal(st.status.phoenix.state, 'unchanged');
+  assert.equal(log.length, 1);
 });
 
 test('packages appearing only after the run are reported as added', () => {
-  const rec = reconcileVersions({}, { telemetry: '1.2.1' }, {});
+  const rec = reconcileVersions({}, { telemetry: '1.2.1' });
   assert.deepEqual(rec.added, [{ name: 'telemetry', to: '1.2.1' }]);
 });
 
 test('packages gone after the run are reported as removed', () => {
-  const rec = reconcileVersions({ old_dep: '0.1.0' }, {}, { old_dep: { state: 'removed' } });
+  const rec = reconcileVersions({ old_dep: '0.1.0' }, {});
   assert.deepEqual(rec.removed, [{ name: 'old_dep', from: '0.1.0' }]);
 });
 
 test('a real downgrade ends downgraded, not upgraded, with correct from/to', () => {
   const st = newTaskStatus(['phoenix']);
-  st.status.phoenix = { state: 'queued', from: null, to: null, extra: false };
-  const rec = reconcileVersions({ phoenix: '1.7.14' }, { phoenix: '1.7.10' }, st.status);
+  st.status.phoenix = { state: 'queued', from: null, to: null };
+  const rec = reconcileVersions({ phoenix: '1.7.14' }, { phoenix: '1.7.10' });
   const log = [];
   applyReconciliation(st, rec, log);
 
@@ -113,7 +115,7 @@ test('a real downgrade ends downgraded, not upgraded, with correct from/to', () 
 
 test('a real upgrade ends upgraded with correct from/to', () => {
   const st = newTaskStatus(['phoenix']);
-  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.14' }, st.status);
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.14' });
   const log = [];
   applyReconciliation(st, rec, log);
 
@@ -124,8 +126,8 @@ test('a real upgrade ends upgraded with correct from/to', () => {
 
 test('a false upgraded claim on an unmoved package is corrected to unchanged, from equals to, and logs once', () => {
   const st = newTaskStatus(['phoenix']);
-  st.status.phoenix = { state: 'upgraded', from: '1.7.10', to: '1.7.14', extra: false };
-  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' }, st.status);
+  st.status.phoenix = { state: 'upgraded', from: '1.7.10', to: '1.7.14' };
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' });
   const log = [];
   applyReconciliation(st, rec, log);
 
@@ -136,8 +138,8 @@ test('a false upgraded claim on an unmoved package is corrected to unchanged, fr
 
 test('a false new claim on an unchanged package is corrected to unchanged and logged', () => {
   const st = newTaskStatus(['phoenix']);
-  st.status.phoenix = { state: 'new', from: null, to: '1.7.10', extra: false };
-  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' }, st.status);
+  st.status.phoenix = { state: 'new', from: null, to: '1.7.10' };
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' });
   const log = [];
   applyReconciliation(st, rec, log);
 
@@ -147,12 +149,11 @@ test('a false new claim on an unchanged package is corrected to unchanged and lo
 
 test('a settled unchanged claim that actually moved logs once; an unsettled queued claim that moved logs nothing', () => {
   const st = newTaskStatus(['phoenix', 'ecto']);
-  st.status.phoenix = { state: 'unchanged', from: '1.7.10', to: '1.7.10', extra: false };
+  st.status.phoenix = { state: 'unchanged', from: '1.7.10', to: '1.7.10' };
   // st.status.ecto.state stays 'queued' — the stream never reported it.
   const rec = reconcileVersions(
     { phoenix: '1.7.10', ecto: '3.11.0' },
     { phoenix: '1.7.14', ecto: '3.12.4' },
-    st.status,
   );
   const log = [];
   applyReconciliation(st, rec, log);
@@ -164,8 +165,8 @@ test('a settled unchanged claim that actually moved logs once; an unsettled queu
 
 test('a git dep the parser claimed settled cannot be verified and is marked unverified', () => {
   const st = newTaskStatus(['my_git_dep']);
-  st.status.my_git_dep = { state: 'upgraded', from: 'abc123', to: 'def456', extra: false };
-  const rec = reconcileVersions({}, {}, st.status);
+  st.status.my_git_dep = { state: 'upgraded', from: 'abc123', to: 'def456' };
+  const rec = reconcileVersions({}, {});
   const log = [];
   applyReconciliation(st, rec, log);
 
@@ -177,7 +178,7 @@ test('a git dep the parser claimed settled cannot be verified and is marked unve
 test('a git dep left at queued with no version data stays queued and logs nothing', () => {
   const st = newTaskStatus(['my_git_dep']);
   // st.status.my_git_dep.state stays 'queued'.
-  const rec = reconcileVersions({}, {}, st.status);
+  const rec = reconcileVersions({}, {});
   const log = [];
   applyReconciliation(st, rec, log);
 
@@ -187,7 +188,7 @@ test('a git dep left at queued with no version data stays queued and logs nothin
 
 test('a prerelease bump compares equal numerically and ends changed, not downgraded', () => {
   const st = newTaskStatus(['phoenix']);
-  const rec = reconcileVersions({ phoenix: '1.7.10-rc.1' }, { phoenix: '1.7.10-rc.2' }, st.status);
+  const rec = reconcileVersions({ phoenix: '1.7.10-rc.1' }, { phoenix: '1.7.10-rc.2' });
   const log = [];
   applyReconciliation(st, rec, log);
 
@@ -199,7 +200,7 @@ test('a prerelease bump compares equal numerically and ends changed, not downgra
 test('an unchanged package with a blank parser entry gets its version backfilled', () => {
   const st = newTaskStatus(['castore']);
   // st.status.castore stays { state: 'queued', from: null, to: null } — parser never reported it.
-  const rec = reconcileVersions({ castore: '1.0.8' }, { castore: '1.0.8' }, st.status);
+  const rec = reconcileVersions({ castore: '1.0.8' }, { castore: '1.0.8' });
   const log = [];
   applyReconciliation(st, rec, log);
 

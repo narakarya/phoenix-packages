@@ -644,7 +644,7 @@ const bridge = window.__portaBridge;
 
 let deps = [];
 let loading = false;
-let task = null; // { phase, section, status, errorLines, log, logOpen, label, done, code, timedOut, verifyError }
+let task = null; // { section, status, log, logOpen, label, done, code, timedOut, verifyError }
 let showAll = false;
 let mixConstraints = {}; // { depName: "~> x.y" }
 let selectedReview = null;
@@ -715,7 +715,7 @@ async function runTask({ targets, cmd, label, timeoutMs = 300000 }) {
       verifyError = String(e?.message || e);
     }
 
-    const rec = verifyError ? null : reconcileVersions(before, versionSnapshot(), task.status);
+    const rec = verifyError ? null : reconcileVersions(before, versionSnapshot());
     applyReconciliation(task, rec, task.log);
 
     task.done = true;
@@ -828,14 +828,14 @@ const RESOLUTION_SECTIONS = {
 function newTaskStatus(targets) {
   const status = {};
   for (const name of targets) {
-    status[name] = { state: 'queued', from: null, to: null, extra: false };
+    status[name] = { state: 'queued', from: null, to: null };
   }
-  return { phase: 'starting', section: null, status, errorLines: [] };
+  return { section: null, status };
 }
 
 function ensureEntry(st, name) {
   if (!st.status[name]) {
-    st.status[name] = { state: 'queued', from: null, to: null, extra: true };
+    st.status[name] = { state: 'queued', from: null, to: null };
   }
   return st.status[name];
 }
@@ -844,7 +844,6 @@ function parseResolutionLine(line, st) {
   const trimmed = line.trim();
 
   if (/^Resolving .* dependencies/.test(trimmed)) {
-    st.phase = 'resolving';
     for (const e of Object.values(st.status)) {
       if (e.state === 'queued') e.state = 'resolving';
     }
@@ -852,7 +851,6 @@ function parseResolutionLine(line, st) {
   }
 
   if (/^Dependency resolution completed/.test(trimmed)) {
-    st.phase = 'resolved';
     st.section = null;
     return st;
   }
@@ -862,9 +860,15 @@ function parseResolutionLine(line, st) {
     return st;
   }
 
+  // An error line. Nothing is recorded from it here — the error surface for
+  // the UI is task.log plus firstLogErrorIndex(), which rescans the log for
+  // "** " itself. The branch still needs to return early: an error line can
+  // print while st.section is still open (mix can fail mid-way through an
+  // "Upgraded:"/"New:"/etc. block), and without this guard it would fall
+  // through to the indented-package-line regex below. It is safe today only
+  // because that regex requires a lowercase package name to match; returning
+  // early here keeps it safe even if that regex ever changes.
   if (trimmed.startsWith('** ')) {
-    st.errorLines.push(trimmed);
-    st.phase = 'failed';
     return st;
   }
 
@@ -1004,13 +1008,12 @@ function parseMixLock(content) {
 // diff — overrides whatever the stream parser inferred, because mix's output
 // format is not a stable contract and its exit code says nothing about which
 // individual packages moved.
-function reconcileVersions(before, after, status) {
+function reconcileVersions(before, after) {
   const names = new Set([
-    ...Object.keys(status || {}),
     ...Object.keys(after || {}),
     ...Object.keys(before || {}),
   ]);
-  const moved = [], unchanged = [], added = [], removed = [], mismatches = [];
+  const moved = [], unchanged = [], added = [], removed = [];
 
   for (const name of names) {
     const b = before[name];
@@ -1024,15 +1027,9 @@ function reconcileVersions(before, after, status) {
     else if (a && !b) added.push({ name, to: a });
     else if (b && !a) removed.push({ name, from: b });
     else if (b && a) unchanged.push({ name, version: a });
-
-    const claimed = status?.[name]?.state;
-    const didMove = !!(b && a && b !== a);
-    if ((claimed === 'upgraded' || claimed === 'downgraded') && !didMove) {
-      mismatches.push({ name, claimed, actual: a || null });
-    }
   }
 
-  return { moved, unchanged, added, removed, mismatches };
+  return { moved, unchanged, added, removed };
 }
 
 // The state a package's row SHOULD show, derived purely from the version diff.
@@ -1076,12 +1073,12 @@ function applyReconciliation(st, rec, log) {
     const expected = expectedState(name, rec);
 
     if (!expected) {
-      // mix.lock records no version for git and path deps, so there is nothing
-      // to check the claim against. Say that, rather than show an upgrade we
-      // never verified.
+      // No version on either side: a git or path dep (mix.lock stores no version
+      // for those), or a transitive dep absent from the direct-only hex.outdated
+      // listing. Either way the claim cannot be checked. Say so.
       if (SETTLED_STATES.includes(claimed)) {
         e.state = 'unverified';
-        log.push(`[porta] ${name}: mix reported ${claimed}, but mix.lock records no version for it — cannot verify`);
+        log.push(`[porta] ${name}: mix reported ${claimed}, but no before/after version was recorded for it — cannot verify`);
       }
       continue;
     }
