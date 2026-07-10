@@ -926,7 +926,7 @@ function reconcileVersions(before, after, status) {
     if (b && a && b !== a) moved.push({ name, from: b, to: a });
     else if (a && !b) added.push({ name, to: a });
     else if (b && !a) removed.push({ name, from: b });
-    else if (b && a) unchanged.push(name);
+    else if (b && a) unchanged.push({ name, version: a });
 
     const claimed = status?.[name]?.state;
     const didMove = !!(b && a && b !== a);
@@ -942,10 +942,16 @@ function reconcileVersions(before, after, status) {
 // Returns null when the diff carries no information about it.
 function expectedState(name, rec) {
   const moved = rec.moved.find(m => m.name === name);
-  if (moved) return compareVersions(moved.from, moved.to) < 0 ? 'upgraded' : 'downgraded';
+  if (moved) {
+    // compareVersions only reads three numeric segments, so a prerelease bump
+    // or a git ref change compares equal while the strings differ. We know it
+    // moved; we do not know which way.
+    const c = compareVersions(moved.from, moved.to);
+    return c < 0 ? 'upgraded' : c > 0 ? 'downgraded' : 'changed';
+  }
   if (rec.added.some(a => a.name === name)) return 'new';
   if (rec.removed.some(r => r.name === name)) return 'removed';
-  if (rec.unchanged.includes(name)) return 'unchanged';
+  if (rec.unchanged.some(u => u.name === name)) return 'unchanged';
   return null;
 }
 
@@ -955,31 +961,42 @@ function expectedState(name, rec) {
 const SETTLED_STATES = ['upgraded', 'downgraded', 'new', 'unchanged', 'removed'];
 
 // Rewrite per-package state to match the version diff, and record every place
-// the parser and reality disagreed. Reality always wins: mix's output format is
-// not a contract, and its exit code says nothing about which packages moved.
+// the parser and reality disagreed. Reality wins: mix's output format is not a
+// contract, and its exit code says nothing about which packages moved.
 function applyReconciliation(st, rec, log) {
   if (!rec) return;
   const names = new Set([
+    ...Object.keys(st.status),
     ...rec.moved.map(m => m.name),
     ...rec.added.map(a => a.name),
     ...rec.removed.map(r => r.name),
-    ...rec.unchanged,
+    ...rec.unchanged.map(u => u.name),
   ]);
 
   for (const name of names) {
-    const expected = expectedState(name, rec);
-    if (!expected) continue;
     const e = ensureEntry(st, name);
     const claimed = e.state;
+    const expected = expectedState(name, rec);
+
+    if (!expected) {
+      // mix.lock records no version for git and path deps, so there is nothing
+      // to check the claim against. Say that, rather than show an upgrade we
+      // never verified.
+      if (SETTLED_STATES.includes(claimed)) {
+        e.state = 'unverified';
+        log.push(`[porta] ${name}: mix reported ${claimed}, but mix.lock records no version for it — cannot verify`);
+      }
+      continue;
+    }
 
     const moved = rec.moved.find(m => m.name === name);
     const added = rec.added.find(a => a.name === name);
     const removed = rec.removed.find(r => r.name === name);
+    const unchanged = rec.unchanged.find(u => u.name === name);
     if (moved) { e.from = moved.from; e.to = moved.to; }
     else if (added) { e.from = null; e.to = added.to; }
     else if (removed) { e.from = removed.from; e.to = null; }
-    // unchanged: leave from/to alone only if they agree; otherwise clear the lie
-    else if (e.from !== e.to) { e.to = e.from; }
+    else if (unchanged) { e.from = unchanged.version; e.to = unchanged.version; }
 
     e.state = expected;
 

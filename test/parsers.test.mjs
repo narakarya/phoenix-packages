@@ -75,7 +75,7 @@ test('moved packages are detected from the version diff', () => {
     {},
   );
   assert.deepEqual(rec.moved, [{ name: 'phoenix', from: '1.7.10', to: '1.7.14' }]);
-  assert.deepEqual(rec.unchanged, ['castore']);
+  assert.deepEqual(rec.unchanged, [{ name: 'castore', version: '1.0.8' }]);
 });
 
 test('reality overrides a parser that claimed an upgrade that did not happen', () => {
@@ -144,13 +144,64 @@ test('a false new claim on an unchanged package is corrected to unchanged and lo
   assert.equal(log.length, 1);
 });
 
-test('a package the parser never settled is reconciled silently when it actually moved', () => {
-  const st = newTaskStatus(['phoenix']);
-  // st.status.phoenix.state stays 'queued' — the stream never reported it.
-  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.14' }, st.status);
+test('a settled unchanged claim that actually moved logs once; an unsettled queued claim that moved logs nothing', () => {
+  const st = newTaskStatus(['phoenix', 'ecto']);
+  st.status.phoenix = { state: 'unchanged', from: '1.7.10', to: '1.7.10', extra: false };
+  // st.status.ecto.state stays 'queued' — the stream never reported it.
+  const rec = reconcileVersions(
+    { phoenix: '1.7.10', ecto: '3.11.0' },
+    { phoenix: '1.7.14', ecto: '3.12.4' },
+    st.status,
+  );
   const log = [];
   applyReconciliation(st, rec, log);
 
   assert.equal(st.status.phoenix.state, 'upgraded');
+  assert.equal(st.status.ecto.state, 'upgraded');
+  assert.equal(log.length, 1);
+});
+
+test('a git dep the parser claimed settled cannot be verified and is marked unverified', () => {
+  const st = newTaskStatus(['my_git_dep']);
+  st.status.my_git_dep = { state: 'upgraded', from: 'abc123', to: 'def456', extra: false };
+  const rec = reconcileVersions({}, {}, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.my_git_dep.state, 'unverified');
+  assert.equal(log.length, 1);
+  assert.match(log[0], /cannot verify/);
+});
+
+test('a git dep left at queued with no version data stays queued and logs nothing', () => {
+  const st = newTaskStatus(['my_git_dep']);
+  // st.status.my_git_dep.state stays 'queued'.
+  const rec = reconcileVersions({}, {}, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.my_git_dep.state, 'queued');
   assert.equal(log.length, 0);
+});
+
+test('a prerelease bump compares equal numerically and ends changed, not downgraded', () => {
+  const st = newTaskStatus(['phoenix']);
+  const rec = reconcileVersions({ phoenix: '1.7.10-rc.1' }, { phoenix: '1.7.10-rc.2' }, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.phoenix.state, 'changed');
+  assert.equal(st.status.phoenix.from, '1.7.10-rc.1');
+  assert.equal(st.status.phoenix.to, '1.7.10-rc.2');
+});
+
+test('an unchanged package with a blank parser entry gets its version backfilled', () => {
+  const st = newTaskStatus(['castore']);
+  // st.status.castore stays { state: 'queued', from: null, to: null } — parser never reported it.
+  const rec = reconcileVersions({ castore: '1.0.8' }, { castore: '1.0.8' }, st.status);
+  const log = [];
+  applyReconciliation(st, rec, log);
+
+  assert.equal(st.status.castore.from, '1.0.8');
+  assert.equal(st.status.castore.to, '1.0.8');
 });
