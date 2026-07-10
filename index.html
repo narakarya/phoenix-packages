@@ -630,6 +630,7 @@ tr.dep-row.dimmed { opacity: 0.35; }
     Refresh
   </button>
 </div>
+<div class="progress-line" id="task-lastline" style="display:none"></div>
 
 <div class="content" id="content">
   <div class="loading-state">
@@ -670,24 +671,80 @@ async function runStream(cmd, onLine, timeoutMs = 120000) {
   );
 }
 
-async function runWithProgress(cmd, label, timeoutMs = 300000) {
+// One execution path for every mutating mix command.
+//
+// The table stays on screen for the whole run; only status cells are patched.
+// Reconciliation runs even on a non-zero exit or a timeout, because mix may
+// have written mix.lock before it failed — a hard failure does not mean
+// nothing changed.
+async function runTask({ targets, cmd, label, timeoutMs = 300000 }) {
+  if (loading) return null;
   loading = true;
-  document.getElementById('btn-update-all').style.display = 'none';
-  setContent(`
-    <div class="loading-state">
-      <div class="spinner"></div>
-      <span>${label}</span>
-      <div class="progress-line" id="prog"></div>
-    </div>
-  `);
+  selectedReview = null;
+
+  const before = versionSnapshot();
+  // A fresh status object per run, always. applyReconciliation() reads each
+  // entry's state as "what the parser claimed this run"; a reused object would
+  // surface last run's outcome as this run's claim.
+  task = newTaskStatus(targets);
+  task.label = label;
+  task.log = [];
+  task.logOpen = false;
+  task.done = false;
+  render();
+
+  let result;
   try {
-    const result = await runStream(cmd, (line) => {
-      const el = document.getElementById('prog');
-      if (el && line.trim()) el.textContent = line.trim();
+    result = await runStream(cmd, (line) => {
+      task.log.push(line);
+      parseResolutionLine(line, task);
+      paintTask();
     }, timeoutMs);
-    return result;
-  } finally {
-    loading = false;
+  } catch (e) {
+    const msg = String(e?.message || e);
+    task.log.push(msg);
+    result = { code: -1, timed_out: false, stdout: '', stderr: msg };
+  }
+
+  let verifyError = null;
+  try {
+    await refreshData();
+  } catch (e) {
+    verifyError = String(e?.message || e);
+  }
+
+  const rec = verifyError ? null : reconcileVersions(before, versionSnapshot(), task.status);
+  applyReconciliation(task, rec, task.log);
+
+  task.done = true;
+  task.code = result.code;
+  task.timedOut = !!result.timed_out;
+  task.verifyError = verifyError;
+  if (result.code !== 0 || result.timed_out || verifyError) task.logOpen = true;
+
+  loading = false;
+  const ticker = document.getElementById('task-lastline');
+  if (ticker) ticker.style.display = 'none';
+  render();
+  return { result, rec, verifyError };
+}
+
+// The only place an update outcome is announced. Counts come from the version
+// diff, never from the exit code and never from a stale `deps`.
+function summariseTask(rec, verifyError) {
+  if (verifyError) {
+    bridge.ui.toast(`Command ran, but could not verify the result: ${verifyError}`, 'error');
+    return;
+  }
+  const n = rec.moved.length;
+  if (n === 0) {
+    bridge.ui.toast('No package versions changed', 'info');
+  } else if (task.timedOut) {
+    bridge.ui.toast(`Timed out after updating ${n} package${n > 1 ? 's' : ''}`, 'error');
+  } else if (task.code !== 0) {
+    bridge.ui.toast(`${n} package${n > 1 ? 's' : ''} updated, but mix exited with an error`, 'error');
+  } else {
+    bridge.ui.toast(`${n} package${n > 1 ? 's' : ''} updated`, 'success');
   }
 }
 
@@ -2026,6 +2083,14 @@ function paintTask() {
     counter.style.display = 'inline';
     counter.textContent = `${task.label} ${taskCounterText()}`;
   }
+  // The old full-screen spinner streamed mix's latest line; keep that signal.
+  // The log panel only materialises after the run, so this is the live view.
+  const ticker = document.getElementById('task-lastline');
+  if (ticker) {
+    const last = [...task.log].reverse().find(l => l.trim());
+    ticker.style.display = last ? 'block' : 'none';
+    ticker.textContent = last ? last.trim() : '';
+  }
   for (const name of Object.keys(task.status)) {
     const cell = document.getElementById('action-' + name);
     if (cell) cell.innerHTML = renderRowStatus(name);
@@ -2299,43 +2364,30 @@ async function updateDep(name, reviewed = false) {
     return;
   }
 
-  const actionCell = document.getElementById('action-' + name);
-  if (actionCell) {
-    actionCell.innerHTML = '<span class="updating-indicator"><span class="mini-spinner"></span>Updating…</span>';
-  }
+  const out = await runTask({
+    targets: [name],
+    cmd: `mix deps.update ${shellQuote(name)} && mix deps.get`,
+    label: `Updating ${name}`,
+    timeoutMs: 120000,
+  });
+  if (!out) return;
 
-  let result;
-  try {
-    result = await bridge.shell.run(`mix deps.update ${shellQuote(name)} && mix deps.get`, { timeout: 120000 });
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
-  }
-  if (result.code !== 0) {
-    const combined = (result.stderr || '') + (result.stdout || '');
-    if (combined.includes('Unknown dependency')) {
-      bridge.ui.toast(`${name} is a transitive dep — use "Update all" instead`, 'info');
-      render();
-      return;
-    }
-    const msg = (combined || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Failed to update ${name}:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast(`Failed to update ${name}`, 'error');
-    setTimeout(() => render(), 4000);
+  const combined = (out.result.stderr || '') + (out.result.stdout || '');
+  if (out.result.code !== 0 && combined.includes('Unknown dependency')) {
+    bridge.ui.toast(`${name} is a transitive dep — use "Update all" instead`, 'info');
     return;
   }
 
-  selectedReview = null;
-  await refreshData();
-  render();
+  summariseTask(out.rec, out.verifyError);
 
+  // Only diagnose when the version genuinely did not move.
+  const movedIt = out.rec?.moved.some(m => m.name === name);
   const stillOutdated = deps.find(d => d.name === name && d.outdated);
-  if (stillOutdated) {
-    await showConflictDiagnostics(name, `${name} stayed at ${stillOutdated.current} after mix deps.update ${name}. Analyzing what holds it back:`);
-    bridge.ui.toast(`${name} unchanged; analyzing conflict`, 'info');
-  } else {
-    bridge.ui.toast(`${name} updated`, 'success');
+  if (!out.verifyError && !movedIt && stillOutdated) {
+    await showConflictDiagnostics(
+      name,
+      `${name} stayed at ${stillOutdated.current} after mix deps.update ${name}. Analyzing what holds it back:`,
+    );
   }
 }
 
@@ -2344,34 +2396,13 @@ async function updateDep(name, reviewed = false) {
 // than deps.update (which only accepts direct deps).
 async function updateTogether(names) {
   if (loading || !Array.isArray(names) || !names.length) return;
-  selectedReview = null;
   const { cmd } = buildUpdateCommand(names);
-  let result;
-  try {
-    result = await runWithProgress(
-      cmd,
-      `Updating ${names.join(', ')}…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
-  }
-  if (result.timed_out) {
-    bridge.ui.toast('Update timed out', 'error');
-    render();
-    return;
-  }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Combined update failed:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast('Combined update failed', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  bridge.ui.toast(`Updated ${names.join(', ')}`, 'success');
+  const out = await runTask({
+    targets: names,
+    cmd,
+    label: `Updating ${names.join(', ')}`,
+  });
+  if (out) summariseTask(out.rec, out.verifyError);
 }
 
 async function bumpDep(name, newConstraint, reviewed = false) {
@@ -2382,52 +2413,52 @@ async function bumpDep(name, newConstraint, reviewed = false) {
     return;
   }
 
-  const actionCell = document.getElementById('action-' + name);
-  if (actionCell) {
-    actionCell.innerHTML = '<span class="updating-indicator"><span class="mini-spinner"></span>Bumping…</span>';
-  }
-
-  // Backup mix.exs
-  const backupResult = await bridge.shell.run(`cp mix.exs mix.exs.bump.bak`, { timeout: 5000 });
+  const backupResult = await bridge.shell.run('cp mix.exs mix.exs.bump.bak', { timeout: 5000 });
   if (backupResult.code !== 0) {
     bridge.ui.toast('Failed to backup mix.exs', 'error');
-    render();
     return;
   }
 
-  // Apply constraint bump
   const perlScript = `BEGIN{$n=$ENV{DEP};$c=$ENV{C}}s/(\\{:\\Q$n\\E,\\s*")[^"]+(")/$1$c$2/`;
   const bumpResult = await bridge.shell.run(
     `DEP=${shellQuote(name)} C=${shellQuote(newConstraint)} perl -0pi -e '${perlScript}' mix.exs`,
-    { timeout: 5000 }
+    { timeout: 5000 },
   );
-
   if (bumpResult.code !== 0) {
-    await bridge.shell.run(`mv mix.exs.bump.bak mix.exs`, { timeout: 5000 });
+    await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
     bridge.ui.toast('Failed to edit mix.exs', 'error');
+    return;
+  }
+
+  const out = await runTask({
+    targets: [name],
+    cmd: `mix deps.update ${shellQuote(name)} && mix deps.get`,
+    label: `Bumping ${name} to ${newConstraint}`,
+    timeoutMs: 120000,
+  });
+  if (!out) {
+    await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
+    return;
+  }
+
+  const movedIt = out.rec?.moved.some(m => m.name === name);
+  if (out.result.code !== 0 && !movedIt) {
+    // Nothing moved and mix failed — the constraint edit bought us nothing.
+    await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
+    await refreshData().catch(() => {});
     render();
+    bridge.ui.toast(`${name} bump reverted — see output below`, 'error');
     return;
   }
 
-  // Run mix deps.update
-  const updateResult = await bridge.shell.run(`mix deps.update ${shellQuote(name)}`, { timeout: 120000 });
-
-  if (updateResult.code !== 0) {
-    await bridge.shell.run(`mv mix.exs.bump.bak mix.exs`, { timeout: 5000 });
-    const msg = ((updateResult.stderr || '') + (updateResult.stdout || '') || 'deps.update failed').trim();
-    const shortMsg = msg.split('\n').filter(l => l.includes('dependency') || l.includes('requirement') || l.includes('constraint') || l.startsWith('**')).slice(0, 3).join('\n') || msg.slice(0, 200);
-    setContent(`<div class="error-box">Bump reverted — constraint conflict:\n\n${htmlEscape(shortMsg)}</div>`);
-    bridge.ui.toast(`${name} bump reverted`, 'error');
-    setTimeout(() => render(), 5000);
-    return;
+  await bridge.shell.run('rm -f mix.exs.bump.bak', { timeout: 5000 });
+  if (out.verifyError) {
+    bridge.ui.toast(`Bumped ${name}, but could not verify: ${out.verifyError}`, 'error');
+  } else if (movedIt) {
+    bridge.ui.toast(`${name} bumped to ${newConstraint} and updated`, 'success');
+  } else {
+    bridge.ui.toast(`${name} constraint bumped, but the version did not move`, 'info');
   }
-
-  await bridge.shell.run(`rm -f mix.exs.bump.bak`, { timeout: 5000 });
-
-  selectedReview = null;
-  await refreshData();
-  render();
-  bridge.ui.toast(`${name} bumped to ${newConstraint} and updated`, 'success');
 }
 
 // Update only patch + minor releases — skips major bumps that may break.
@@ -2439,31 +2470,16 @@ async function updateSafe() {
     return;
   }
   const names = safe.map(d => d.name);
-  selectedReview = null;
   const { cmd } = buildUpdateCommand(names);
-  let result;
-  try {
-    result = await runWithProgress(
-      cmd,
-      `Updating ${names.length} safe package${names.length > 1 ? 's' : ''} (patch + minor)…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
+  const out = await runTask({
+    targets: names,
+    cmd,
+    label: `Updating ${names.length} safe package${names.length > 1 ? 's' : ''} (patch + minor)`,
+  });
+  if (out) {
+    summariseTask(out.rec, out.verifyError);
+    runSecurityAndHousekeeping();
   }
-  if (result.timed_out) { bridge.ui.toast('Update timed out', 'error'); render(); return; }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Safe update failed:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast('Safe update failed', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  runSecurityAndHousekeeping();
-  bridge.ui.toast('Patch + minor updates applied', 'success');
 }
 
 // Split names into direct deps (declared in mix.exs) and transitive ones
@@ -2495,38 +2511,18 @@ async function updateVulnerable() {
   if (loading) return;
   const names = Object.keys(vulnMap);
   if (!names.length) return;
-  selectedReview = null;
-
   const { cmd, transitive } = buildUpdateCommand(names);
-  const note = transitive.length
-    ? ` (${transitive.length} transitive — unlocking & re-resolving)`
-    : '';
-
-  let result;
-  try {
-    result = await runWithProgress(
-      cmd,
-      `Updating ${names.length} vulnerable package${names.length > 1 ? 's' : ''}${note}…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
+  const note = transitive.length ? ` (${transitive.length} transitive)` : '';
+  const out = await runTask({
+    targets: names,
+    cmd,
+    label: `Updating ${names.length} vulnerable package${names.length > 1 ? 's' : ''}${note}`,
+  });
+  if (out) {
+    summariseTask(out.rec, out.verifyError);
+    // Re-audit: a transitive dep pinned by its parent may still be vulnerable.
+    runSecurityAndHousekeeping();
   }
-  if (result.timed_out) { bridge.ui.toast('Update timed out', 'error'); render(); return; }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Vulnerability update failed:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast('Update failed — a constraint may pin the vulnerable version', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  runSecurityAndHousekeeping();
-  // The re-audit confirms whether the patched version was actually reachable;
-  // a transitive dep pinned by its parent may still show after unlock.
-  bridge.ui.toast('Updated — re-auditing to confirm', 'success');
 }
 
 // Remove unused entries from mix.lock.
@@ -2554,48 +2550,20 @@ async function updateAll() {
   if (loading) return;
   const outdated = deps.filter(d => d.outdated);
   if (!outdated.length) return;
-  const unreviewedMajor = outdated.find(d => updateType(d.current, d.latest) === 'major' && !reviewedDeps.has(d.name));
+  const unreviewedMajor = outdated.find(d =>
+    updateType(d.current, d.latest) === 'major' && !reviewedDeps.has(d.name));
   if (unreviewedMajor) {
     await showPackageReview(unreviewedMajor.name);
     bridge.ui.toast(`${unreviewedMajor.name} is a major update. Review it before updating all.`, 'info');
     return;
   }
-  const prevCount = outdated.length;
-
-  let result;
-  try {
-    result = await runWithProgress(
-      'mix deps.update --all && mix deps.get',
-      `Updating ${outdated.length} package${outdated.length > 1 ? 's' : ''}…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
-  }
-  if (result.timed_out) {
-    bridge.ui.toast('Update timed out', 'error');
-    render();
-    return;
-  }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Update failed:\n\n${msg}</div>`);
-    bridge.ui.toast('Update failed', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  const nowOutdated = deps.filter(d => d.outdated).length;
-  const updated = prevCount - nowOutdated;
-  if (updated === 0) {
-    bridge.ui.toast('No packages updated (constraint conflicts)', 'info');
-  } else if (nowOutdated === 0) {
-    bridge.ui.toast('All packages updated', 'success');
-  } else {
-    bridge.ui.toast(`${updated} of ${prevCount} packages updated`, 'success');
-  }
+  const names = outdated.map(d => d.name);
+  const out = await runTask({
+    targets: names,
+    cmd: 'mix deps.update --all && mix deps.get',
+    label: `Updating ${names.length} package${names.length > 1 ? 's' : ''}`,
+  });
+  if (out) summariseTask(out.rec, out.verifyError);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
