@@ -575,6 +575,40 @@ button.info-btn {
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }
+.task-status { font-size: 10px; font-family: monospace; }
+.task-status.ok { color: var(--green); }
+.task-status.warn { color: var(--amber); }
+.task-status.err { color: var(--red); }
+.task-status.muted { color: var(--text-muted); }
+.task-status.queued { color: var(--text-muted); }
+tr.dep-row.dimmed { opacity: 0.35; }
+#task-counter { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+.log-panel {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.22);
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.log-body {
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px;
+  font-family: monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.log-panel.collapsed .log-body { display: none; }
+.log-panel.collapsed .log-head { border-bottom: none; }
+.log-line { color: var(--text-dim); }
+.log-line.log-error { color: var(--red); }
 </style>
 </head>
 <body>
@@ -586,6 +620,7 @@ button.info-btn {
   <button id="btn-update-all" class="primary" style="display:none">
     Update all outdated
   </button>
+  <span id="task-counter" style="display:none"></span>
   <button id="btn-toggle-all">Show all</button>
   <button id="btn-refresh">
     <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
@@ -595,6 +630,7 @@ button.info-btn {
     Refresh
   </button>
 </div>
+<div class="progress-line" id="task-lastline" style="display:none"></div>
 
 <div class="content" id="content">
   <div class="loading-state">
@@ -608,6 +644,7 @@ const bridge = window.__portaBridge;
 
 let deps = [];
 let loading = false;
+let task = null; // { section, status, log, logOpen, label, done, code, timedOut, verifyError }
 let showAll = false;
 let mixConstraints = {}; // { depName: "~> x.y" }
 let selectedReview = null;
@@ -634,24 +671,84 @@ async function runStream(cmd, onLine, timeoutMs = 120000) {
   );
 }
 
-async function runWithProgress(cmd, label, timeoutMs = 300000) {
+// One execution path for every mutating mix command.
+//
+// The table stays on screen for the whole run; only status cells are patched.
+// Reconciliation runs even on a non-zero exit or a timeout, because mix may
+// have written mix.lock before it failed — a hard failure does not mean
+// nothing changed.
+async function runTask({ targets, cmd, label, timeoutMs = 300000 }) {
+  if (loading) return null;
   loading = true;
-  document.getElementById('btn-update-all').style.display = 'none';
-  setContent(`
-    <div class="loading-state">
-      <div class="spinner"></div>
-      <span>${label}</span>
-      <div class="progress-line" id="prog"></div>
-    </div>
-  `);
   try {
-    const result = await runStream(cmd, (line) => {
-      const el = document.getElementById('prog');
-      if (el && line.trim()) el.textContent = line.trim();
-    }, timeoutMs);
-    return result;
+    selectedReview = null;
+
+    const before = versionSnapshot();
+    // A fresh status object per run, always. applyReconciliation() reads each
+    // entry's state as "what the parser claimed this run"; a reused object would
+    // surface last run's outcome as this run's claim.
+    task = newTaskStatus(targets);
+    task.label = label;
+    task.log = [];
+    task.logOpen = false;
+    task.done = false;
+    render();
+
+    let result;
+    try {
+      result = await runStream(cmd, (line) => {
+        task.log.push(line);
+        if (line.trim()) task.lastLine = line.trim();
+        parseResolutionLine(line, task);
+        paintTask();
+      }, timeoutMs);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      task.log.push(msg);
+      result = { code: -1, timed_out: false, stdout: '', stderr: msg };
+    }
+
+    let verifyError = null;
+    try {
+      await refreshData();
+    } catch (e) {
+      verifyError = String(e?.message || e);
+    }
+
+    const rec = verifyError ? null : reconcileVersions(before, versionSnapshot());
+    applyReconciliation(task, rec, task.log);
+
+    task.done = true;
+    task.code = result.code;
+    task.timedOut = !!result.timed_out;
+    task.verifyError = verifyError;
+    if (result.code !== 0 || result.timed_out || verifyError) task.logOpen = true;
+
+    return { result, rec, verifyError };
   } finally {
     loading = false;
+    const ticker = document.getElementById('task-lastline');
+    if (ticker) ticker.style.display = 'none';
+    render();
+  }
+}
+
+// The only place an update outcome is announced. Counts come from the version
+// diff, never from the exit code and never from a stale `deps`.
+function summariseTask(rec, verifyError) {
+  if (verifyError) {
+    bridge.ui.toast(`Command ran, but could not verify the result: ${verifyError}`, 'error');
+    return;
+  }
+  const n = rec.moved.length;
+  if (n === 0) {
+    bridge.ui.toast('No package versions changed', 'info');
+  } else if (task.timedOut) {
+    bridge.ui.toast(`Timed out after updating ${n} package${n > 1 ? 's' : ''}`, 'error');
+  } else if (task.code !== 0) {
+    bridge.ui.toast(`${n} package${n > 1 ? 's' : ''} updated, but mix exited with an error`, 'error');
+  } else {
+    bridge.ui.toast(`${n} package${n > 1 ? 's' : ''} updated`, 'success');
   }
 }
 
@@ -713,6 +810,96 @@ function parseMixExsConstraints(content) {
     constraints[m[1]] = m[2];
   }
   return constraints;
+}
+
+// ── Task progress parsing ─────────────────────────────────────────────────────
+// mix runs one atomic resolution: every per-package outcome arrives inside the
+// "Dependency resolution completed:" block. Pure so it can be tested against
+// captured mix output — see test/parsers.test.mjs.
+
+const RESOLUTION_SECTIONS = {
+  'Unchanged:': 'unchanged',
+  'Upgraded:': 'upgraded',
+  'Downgraded:': 'downgraded',
+  'New:': 'new',
+  'Removed:': 'removed',
+};
+
+function newTaskStatus(targets) {
+  const status = {};
+  for (const name of targets) {
+    status[name] = { state: 'queued', from: null, to: null };
+  }
+  return { section: null, status };
+}
+
+function ensureEntry(st, name) {
+  if (!st.status[name]) {
+    st.status[name] = { state: 'queued', from: null, to: null };
+  }
+  return st.status[name];
+}
+
+function parseResolutionLine(line, st) {
+  const trimmed = line.trim();
+
+  if (/^Resolving .* dependencies/.test(trimmed)) {
+    for (const e of Object.values(st.status)) {
+      if (e.state === 'queued') e.state = 'resolving';
+    }
+    return st;
+  }
+
+  if (/^Dependency resolution completed/.test(trimmed)) {
+    st.section = null;
+    return st;
+  }
+
+  if (RESOLUTION_SECTIONS[trimmed]) {
+    st.section = RESOLUTION_SECTIONS[trimmed];
+    return st;
+  }
+
+  // An error line. Nothing is recorded from it here — the error surface for
+  // the UI is task.log plus firstLogErrorIndex(), which rescans the log for
+  // "** " itself. The branch still needs to return early: an error line can
+  // print while st.section is still open (mix can fail mid-way through an
+  // "Upgraded:"/"New:"/etc. block), and without this guard it would fall
+  // through to the indented-package-line regex below. It is safe today only
+  // because that regex requires a lowercase package name to match; returning
+  // early here keeps it safe even if that regex ever changes.
+  if (trimmed.startsWith('** ')) {
+    return st;
+  }
+
+  const fetching = /^\* (?:Getting|Updating) ([a-z_][a-z0-9_]*)/.exec(trimmed);
+  if (fetching) {
+    ensureEntry(st, fetching[1]).state = 'fetching';
+    st.section = null;
+    return st;
+  }
+
+  // Section entries are indented; the guard stops a stray flush-left line from
+  // being read as a package.
+  if (st.section && /^\s/.test(line)) {
+    const m = /^([a-z_][a-z0-9_]*)\s+(\S+?)(?:\s+=>\s+(\S+))?$/.exec(trimmed);
+    if (m) {
+      const [, name, v1, v2] = m;
+      const e = ensureEntry(st, name);
+      e.state = st.section;
+      if (v2) {
+        e.from = v1;
+        e.to = v2;
+      } else if (st.section === 'new') {
+        e.to = v1;
+      } else {
+        e.from = v1;
+        e.to = v1;
+      }
+    }
+  }
+
+  return st;
 }
 
 // Suggest the tightest safe constraint that allows the latest version.
@@ -815,6 +1002,123 @@ function parseMixLock(content) {
     lock[head[1]] = { version: head[2], reqs };
   }
   return lock;
+}
+
+// Pure. `before`/`after` map package name → version. Reality — the version
+// diff — overrides whatever the stream parser inferred, because mix's output
+// format is not a stable contract and its exit code says nothing about which
+// individual packages moved.
+function reconcileVersions(before, after) {
+  const names = new Set([
+    ...Object.keys(after || {}),
+    ...Object.keys(before || {}),
+  ]);
+  const moved = [], unchanged = [], added = [], removed = [];
+
+  for (const name of names) {
+    const b = before[name];
+    const a = after[name];
+
+    // A name with neither a before nor an after version carries no version
+    // data to reconcile (e.g. status-only entries for packages the resolver
+    // never touched) — it falls through every branch below and is dropped
+    // intentionally, not by omission.
+    if (b && a && b !== a) moved.push({ name, from: b, to: a });
+    else if (a && !b) added.push({ name, to: a });
+    else if (b && !a) removed.push({ name, from: b });
+    else if (b && a) unchanged.push({ name, version: a });
+  }
+
+  return { moved, unchanged, added, removed };
+}
+
+// The state a package's row SHOULD show, derived purely from the version diff.
+// Returns null when the diff carries no information about it.
+function expectedState(name, rec) {
+  const moved = rec.moved.find(m => m.name === name);
+  if (moved) {
+    // compareVersions only reads three numeric segments, so a prerelease bump
+    // or a git ref change compares equal while the strings differ. We know it
+    // moved; we do not know which way.
+    const c = compareVersions(moved.from, moved.to);
+    return c < 0 ? 'upgraded' : c > 0 ? 'downgraded' : 'changed';
+  }
+  if (rec.added.some(a => a.name === name)) return 'new';
+  if (rec.removed.some(r => r.name === name)) return 'removed';
+  if (rec.unchanged.some(u => u.name === name)) return 'unchanged';
+  return null;
+}
+
+// States the parser can assert as final. A disagreement between one of these
+// and the version diff is worth recording — anything else is just a package
+// the stream never got around to reporting.
+const SETTLED_STATES = ['upgraded', 'downgraded', 'new', 'unchanged', 'removed'];
+
+// Rewrite per-package state to match the version diff, and record every place
+// the parser and reality disagreed. Reality wins: mix's output format is not a
+// contract, and its exit code says nothing about which packages moved.
+function applyReconciliation(st, rec, log) {
+  if (!rec) return;
+  const names = new Set([
+    ...Object.keys(st.status),
+    ...rec.moved.map(m => m.name),
+    ...rec.added.map(a => a.name),
+    ...rec.removed.map(r => r.name),
+    ...rec.unchanged.map(u => u.name),
+  ]);
+
+  for (const name of names) {
+    const e = ensureEntry(st, name);
+    const claimed = e.state;
+    const expected = expectedState(name, rec);
+
+    if (!expected) {
+      // No version on either side: a git or path dep (mix.lock stores no version
+      // for those), or a transitive dep absent from the direct-only hex.outdated
+      // listing. Either way the claim cannot be checked. Say so.
+      if (SETTLED_STATES.includes(claimed)) {
+        e.state = 'unverified';
+        log.push(`[porta] ${name}: mix reported ${claimed}, but no before/after version was recorded for it — cannot verify`);
+      }
+      continue;
+    }
+
+    const moved = rec.moved.find(m => m.name === name);
+    const added = rec.added.find(a => a.name === name);
+    const removed = rec.removed.find(r => r.name === name);
+    const unchanged = rec.unchanged.find(u => u.name === name);
+    if (moved) { e.from = moved.from; e.to = moved.to; }
+    else if (added) { e.from = null; e.to = added.to; }
+    else if (removed) { e.from = removed.from; e.to = null; }
+    else if (unchanged) { e.from = unchanged.version; e.to = unchanged.version; }
+
+    e.state = expected;
+
+    if (SETTLED_STATES.includes(claimed) && claimed !== expected) {
+      log.push(`[porta] ${name}: mix reported ${claimed} but the version diff says ${expected}`);
+    }
+  }
+}
+
+// Pure. Turns raw command output into the dependency list.
+//
+// Throws only when the output is genuinely unusable. A non-zero exit WITH
+// stdout is the normal, successful case: mix hex.outdated exits 1 whenever any
+// dependency is outdated.
+function buildDepsFromResults(outdatedResult, mixExsContent, { retiredMap, vulnMap }) {
+  if (outdatedResult.code !== 0 && !outdatedResult.stdout) {
+    throw new Error((outdatedResult.stderr || 'mix hex.outdated failed').trim());
+  }
+
+  const constraints = mixExsContent ? parseMixExsConstraints(mixExsContent) : {};
+  const deps = parseMixOutdated(outdatedResult.stdout).map(d => ({
+    ...d,
+    constraint: constraints[d.name] || null,
+    retired: retiredMap[d.name] || null,
+    vuln: vulnMap[d.name] || null,
+  }));
+
+  return { deps, constraints };
 }
 
 // ── Security audit + housekeeping ───────────────────────────────────────────────
@@ -1744,6 +2048,138 @@ async function runSecurityAndHousekeeping() {
   render();
 }
 
+function taskCounterText() {
+  if (!task) return '';
+  const entries = Object.values(task.status);
+  const settled = entries.filter(e =>
+    ['upgraded', 'downgraded', 'changed', 'new', 'unchanged', 'removed', 'unverified', 'failed'].includes(e.state)).length;
+  return `${settled}/${entries.length}`;
+}
+
+function renderRowStatus(name) {
+  const e = task?.status?.[name];
+  if (!e) return '';
+  switch (e.state) {
+    case 'queued':     return '<span class="task-status queued">queued</span>';
+    case 'resolving':  return '<span class="updating-indicator"><span class="mini-spinner"></span>resolving…</span>';
+    case 'fetching':   return '<span class="updating-indicator"><span class="mini-spinner"></span>fetching…</span>';
+    case 'upgraded':   return `<span class="task-status ok">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
+    case 'downgraded': return `<span class="task-status warn">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
+    case 'changed':    return `<span class="task-status muted">${htmlEscape(e.from)} → ${htmlEscape(e.to)}</span>`;
+    case 'new':        return `<span class="task-status ok">new ${htmlEscape(e.to)}</span>`;
+    case 'unchanged':  return '<span class="task-status muted">unchanged</span>';
+    case 'removed':    return '<span class="task-status muted">removed</span>';
+    case 'unverified': return '<span class="task-status warn" title="mix.lock records no version for this dep (git or path), so the result could not be checked">unverified</span>';
+    case 'failed':     return '<span class="task-status err">failed</span>';
+    default:           return '';
+  }
+}
+
+// Patch only what changed. A full render() here would destroy scroll position
+// and any open review panel on every streamed line.
+function paintTask() {
+  if (!task) return;
+  const counter = document.getElementById('task-counter');
+  if (counter) {
+    counter.style.display = 'inline';
+    counter.textContent = `${task.label} ${taskCounterText()}`;
+  }
+  // The old full-screen spinner streamed mix's latest line; keep that signal.
+  // The log panel only materialises after the run, so this is the live view.
+  const ticker = document.getElementById('task-lastline');
+  if (ticker) {
+    ticker.style.display = task.lastLine ? 'block' : 'none';
+    ticker.textContent = task.lastLine || '';
+  }
+  for (const name of Object.keys(task.status)) {
+    const cell = document.getElementById('action-' + name);
+    if (cell) cell.innerHTML = renderRowStatus(name);
+  }
+}
+
+function firstLogErrorIndex() {
+  if (!task) return -1;
+  return task.log.findIndex(l => l.trim().startsWith('** '));
+}
+
+function renderLogPanel() {
+  if (!task || !task.log.length) return '';
+  const errIdx = firstLogErrorIndex();
+  const body = task.log
+    .map((l, i) => `<div class="log-line${i === errIdx ? ' log-error' : ''}" id="log-line-${i}">${htmlEscape(l)}</div>`)
+    .join('');
+  const verify = task.verifyError
+    ? `<span class="task-status err">could not verify: ${htmlEscape(task.verifyError)}</span>`
+    : '';
+  return `<div class="log-panel${task.logOpen ? '' : ' collapsed'}" id="log-panel">
+    <div class="log-head">
+      <button onclick="toggleTaskLog()">${task.logOpen ? 'Hide' : 'Show'} output (${task.log.length} lines)</button>
+      <button onclick="copyTaskLog()">Copy</button>
+      ${verify}
+    </div>
+    <div class="log-body">${body}</div>
+  </div>`;
+}
+
+function toggleTaskLog() {
+  if (!task) return;
+  task.logOpen = !task.logOpen;
+  const panel = document.getElementById('log-panel');
+  if (!panel) { render(); return; }
+  panel.classList.toggle('collapsed', !task.logOpen);
+  const btn = panel.querySelector('.log-head button');
+  if (btn) btn.textContent = `${task.logOpen ? 'Hide' : 'Show'} output (${task.log.length} lines)`;
+  if (task.logOpen) {
+    task.logScrolled = false;
+    scrollToFirstLogError();
+  }
+}
+
+function copyTaskLog() {
+  if (!task) return;
+  navigator.clipboard.writeText(task.log.join('\n'))
+    .then(() => bridge.ui.toast('Output copied to clipboard', 'success'))
+    .catch(() => {});
+}
+
+// Scroll the log body to the failure. Mix does not always print a `** ` line —
+// a resolution conflict or a network error just ends — so with no marker the
+// tail is where the failure text is. Scroll the panel, not the page: mirrors
+// scrollToFile()'s offsetTop arithmetic rather than scrollIntoView, which would
+// drag #content along with it.
+function scrollToFirstLogError() {
+  if (!task || !task.log.length) return;
+  const idx = firstLogErrorIndex();
+  const target = idx >= 0 ? idx : task.log.length - 1;
+  const el = document.getElementById('log-line-' + target);
+  const body = document.querySelector('.log-body');
+  if (el && body) {
+    body.scrollTop = Math.max(0, el.offsetTop - body.offsetTop - body.clientHeight / 2);
+    task.logScrollTop = body.scrollTop;
+  }
+  task.logScrolled = true;
+}
+
+// render() rebuilds #content wholesale, so a rebuilt .log-body starts at
+// scrollTop 0. Put the user back where they were — or, the first time the panel
+// opens, at the failure.
+function restoreLogScroll() {
+  if (!task) return;
+  if (!task.logScrolled) { scrollToFirstLogError(); return; }
+  const body = document.querySelector('.log-body');
+  if (body) body.scrollTop = task.logScrollTop || 0;
+}
+
+// Remember where the user left the log. The .log-body node is recreated on every
+// render(), so this re-attaches each time rather than leaking listeners.
+function trackLogScroll() {
+  const body = document.querySelector('.log-body');
+  if (!body) return;
+  body.addEventListener('scroll', () => {
+    if (task) task.logScrollTop = body.scrollTop;
+  }, { passive: true });
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function renderBanners() {
@@ -1776,6 +2212,8 @@ function renderBanners() {
 function render() {
   const outdated = deps.filter(d => d.outdated);
   const blocked  = deps.filter(d => !d.outdated && d.current !== d.latest);
+  const counter = document.getElementById('task-counter');
+  if (counter) counter.style.display = task ? 'inline' : 'none';
   let html = '';
 
   html += renderBanners();
@@ -1830,7 +2268,9 @@ function render() {
     const suggested = isBlocked && directAllowsLatest !== true ? suggestedConstraint(dep.latest, dep.constraint) : null;
 
     let actionHtml = '';
-    if (dep.outdated) {
+    if (task && task.status[dep.name]) {
+      actionHtml = renderRowStatus(dep.name);
+    } else if (dep.outdated) {
       if (type === 'major' && !reviewedDeps.has(dep.name)) {
         actionHtml = `<button class="info-btn" onclick="showPackageReview('${esc(dep.name)}')">Review</button>`;
       } else {
@@ -1849,7 +2289,8 @@ function render() {
       (dep.vuln ? `<span class="dep-flag vuln" title="${htmlEscape(dep.vuln.advisory || 'Known vulnerability')}">vuln</span>` : '') +
       (dep.retired ? `<span class="dep-flag retired" title="${htmlEscape('Retired on Hex: ' + dep.retired.reason)}">retired</span>` : '');
 
-    html += `<tr class="dep-row" data-name="${dep.name}">
+    const dimmed = task && !task.status[dep.name] ? ' dimmed' : '';
+    html += `<tr class="dep-row${dimmed}" data-name="${dep.name}">
       <td><span class="dep-name"><a href="#" class="dep-link" onclick="openUrl('${esc(hexPackageUrl(dep.name))}');return false;">${dep.name}</a>${dep.env ? `<span class="dep-env">(${dep.env})</span>` : ''}${flags}</span></td>
       <td><span class="ver ver-current">${dep.current}</span></td>
       <td>${renderLatestVer(dep.current, dep.latest, type)}</td>
@@ -1863,7 +2304,12 @@ function render() {
   }
 
   html += `</tbody></table>`;
+  html += renderLogPanel();
   document.getElementById('content').innerHTML = html;
+  if (task && task.log.length) {
+    trackLogScroll();
+    if (task.logOpen) restoreLogScroll();
+  }
 }
 
 function esc(s) {
@@ -1872,32 +2318,41 @@ function esc(s) {
 
 // ── Update ────────────────────────────────────────────────────────────────────
 
+// Snapshot of the currently-known version of every dep, for before/after diffs.
+function versionSnapshot() {
+  const snap = {};
+  for (const d of deps) snap[d.name] = d.current;
+  return snap;
+}
+
+// Re-read dependency state. Throws when the data genuinely cannot be read —
+// callers must say "could not verify" rather than invent a result. All the
+// decision logic lives in buildDepsFromResults(), which is unit-tested.
 async function refreshData() {
+  const cmd = showAll ? 'mix hex.outdated --all' : 'mix hex.outdated';
+  const result = await bridge.shell.run(cmd, { timeout: 120000 });
+
+  let mixExsContent = '';
   try {
-    const result = await bridge.shell.run(showAll ? 'mix hex.outdated --all' : 'mix hex.outdated', { timeout: 120000 });
-    if (result.code === 0 && result.stdout) {
-      deps = parseMixOutdated(result.stdout);
-      try {
-        const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
-        if (mixResult.code === 0) mixConstraints = parseMixExsConstraints(mixResult.stdout);
-      } catch (_) { mixConstraints = {}; }
-      // Re-attach security flags discovered in the last audit pass.
-      deps = deps.map(d => ({
-        ...d,
-        constraint: mixConstraints[d.name] || null,
-        retired: retiredMap[d.name] || null,
-        vuln: vulnMap[d.name] || null,
-      }));
-      lockCache = null;
-      const outdatedDeps = deps.filter(d => d.outdated);
-      setTitle(outdatedDeps.length);
-      const btn = document.getElementById('btn-update-all');
-      if (btn) btn.style.display = outdatedDeps.length > 0 ? 'inline-flex' : 'none';
-      const safeBtn = document.getElementById('btn-update-safe');
-      const safeCount = outdatedDeps.filter(d => updateType(d.current, d.latest) !== 'major').length;
-      if (safeBtn) safeBtn.style.display = safeCount > 0 ? 'inline-flex' : 'none';
-    }
-  } catch (_) {}
+    const mixResult = await bridge.shell.run('cat mix.exs', { timeout: 5000 });
+    if (mixResult.code === 0) mixExsContent = mixResult.stdout;
+  } catch (_) {
+    mixExsContent = '';
+  }
+
+  const built = buildDepsFromResults(result, mixExsContent, { retiredMap, vulnMap });
+  deps = built.deps;
+  mixConstraints = built.constraints;
+
+  lockCache = null;
+  const outdatedDeps = deps.filter(d => d.outdated);
+  setTitle(outdatedDeps.length);
+
+  const btn = document.getElementById('btn-update-all');
+  if (btn) btn.style.display = outdatedDeps.length > 0 ? 'inline-flex' : 'none';
+  const safeBtn = document.getElementById('btn-update-safe');
+  const safeCount = outdatedDeps.filter(d => updateType(d.current, d.latest) !== 'major').length;
+  if (safeBtn) safeBtn.style.display = safeCount > 0 ? 'inline-flex' : 'none';
 }
 
 async function updateDep(name, reviewed = false) {
@@ -1909,43 +2364,30 @@ async function updateDep(name, reviewed = false) {
     return;
   }
 
-  const actionCell = document.getElementById('action-' + name);
-  if (actionCell) {
-    actionCell.innerHTML = '<span class="updating-indicator"><span class="mini-spinner"></span>Updating…</span>';
-  }
+  const out = await runTask({
+    targets: [name],
+    cmd: `mix deps.update ${shellQuote(name)} && mix deps.get`,
+    label: `Updating ${name}`,
+    timeoutMs: 120000,
+  });
+  if (!out) return;
 
-  let result;
-  try {
-    result = await bridge.shell.run(`mix deps.update ${shellQuote(name)} && mix deps.get`, { timeout: 120000 });
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
-  }
-  if (result.code !== 0) {
-    const combined = (result.stderr || '') + (result.stdout || '');
-    if (combined.includes('Unknown dependency')) {
-      bridge.ui.toast(`${name} is a transitive dep — use "Update all" instead`, 'info');
-      render();
-      return;
-    }
-    const msg = (combined || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Failed to update ${name}:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast(`Failed to update ${name}`, 'error');
-    setTimeout(() => render(), 4000);
+  const combined = (out.result.stderr || '') + (out.result.stdout || '');
+  if (out.result.code !== 0 && combined.includes('Unknown dependency')) {
+    bridge.ui.toast(`${name} is a transitive dep — use "Update all" instead`, 'info');
     return;
   }
 
-  selectedReview = null;
-  await refreshData();
-  render();
+  summariseTask(out.rec, out.verifyError);
 
+  // Only diagnose when the version genuinely did not move.
+  const movedIt = out.rec?.moved.some(m => m.name === name);
   const stillOutdated = deps.find(d => d.name === name && d.outdated);
-  if (stillOutdated) {
-    await showConflictDiagnostics(name, `${name} stayed at ${stillOutdated.current} after mix deps.update ${name}. Analyzing what holds it back:`);
-    bridge.ui.toast(`${name} unchanged; analyzing conflict`, 'info');
-  } else {
-    bridge.ui.toast(`${name} updated`, 'success');
+  if (!out.verifyError && !movedIt && stillOutdated) {
+    await showConflictDiagnostics(
+      name,
+      `${name} stayed at ${stillOutdated.current} after mix deps.update ${name}. Analyzing what holds it back:`,
+    );
   }
 }
 
@@ -1954,34 +2396,13 @@ async function updateDep(name, reviewed = false) {
 // than deps.update (which only accepts direct deps).
 async function updateTogether(names) {
   if (loading || !Array.isArray(names) || !names.length) return;
-  selectedReview = null;
   const { cmd } = buildUpdateCommand(names);
-  let result;
-  try {
-    result = await runWithProgress(
-      cmd,
-      `Updating ${names.join(', ')}…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
-  }
-  if (result.timed_out) {
-    bridge.ui.toast('Update timed out', 'error');
-    render();
-    return;
-  }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Combined update failed:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast('Combined update failed', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  bridge.ui.toast(`Updated ${names.join(', ')}`, 'success');
+  const out = await runTask({
+    targets: names,
+    cmd,
+    label: `Updating ${names.join(', ')}`,
+  });
+  if (out) summariseTask(out.rec, out.verifyError);
 }
 
 async function bumpDep(name, newConstraint, reviewed = false) {
@@ -1992,52 +2413,67 @@ async function bumpDep(name, newConstraint, reviewed = false) {
     return;
   }
 
-  const actionCell = document.getElementById('action-' + name);
-  if (actionCell) {
-    actionCell.innerHTML = '<span class="updating-indicator"><span class="mini-spinner"></span>Bumping…</span>';
+  // Hold the lock across the mix.exs edit: without it a second action could run
+  // `mix deps.update` against a half-written mix.exs. runTask takes the lock
+  // again itself, so release it immediately before delegating.
+  loading = true;
+  let edited = false;
+  try {
+    const backupResult = await bridge.shell.run('cp mix.exs mix.exs.bump.bak', { timeout: 5000 });
+    if (backupResult.code !== 0) {
+      bridge.ui.toast('Failed to backup mix.exs', 'error');
+      return;
+    }
+    const perlScript = `BEGIN{$n=$ENV{DEP};$c=$ENV{C}}s/(\\{:\\Q$n\\E,\\s*")[^"]+(")/$1$c$2/`;
+    const bumpResult = await bridge.shell.run(
+      `DEP=${shellQuote(name)} C=${shellQuote(newConstraint)} perl -0pi -e '${perlScript}' mix.exs`,
+      { timeout: 5000 },
+    );
+    if (bumpResult.code !== 0) {
+      await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
+      bridge.ui.toast('Failed to edit mix.exs', 'error');
+      return;
+    }
+    edited = true;
+  } finally {
+    loading = false;
+  }
+  if (!edited) return;
+
+  const out = await runTask({
+    targets: [name],
+    cmd: `mix deps.update ${shellQuote(name)} && mix deps.get`,
+    label: `Bumping ${name} to ${newConstraint}`,
+    timeoutMs: 120000,
+  });
+  if (!out) {
+    await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
+    return;
   }
 
-  // Backup mix.exs
-  const backupResult = await bridge.shell.run(`cp mix.exs mix.exs.bump.bak`, { timeout: 5000 });
-  if (backupResult.code !== 0) {
-    bridge.ui.toast('Failed to backup mix.exs', 'error');
+  const movedIt = out.rec?.moved.some(m => m.name === name);
+  if (out.result.code !== 0 && !movedIt) {
+    // Nothing moved and mix failed — the constraint edit bought us nothing.
+    await bridge.shell.run('mv mix.exs.bump.bak mix.exs', { timeout: 5000 });
+    await refreshData().catch(() => {});
     render();
+    bridge.ui.toast(`${name} bump reverted — see output below`, 'error');
     return;
   }
 
-  // Apply constraint bump
-  const perlScript = `BEGIN{$n=$ENV{DEP};$c=$ENV{C}}s/(\\{:\\Q$n\\E,\\s*")[^"]+(")/$1$c$2/`;
-  const bumpResult = await bridge.shell.run(
-    `DEP=${shellQuote(name)} C=${shellQuote(newConstraint)} perl -0pi -e '${perlScript}' mix.exs`,
-    { timeout: 5000 }
-  );
-
-  if (bumpResult.code !== 0) {
-    await bridge.shell.run(`mv mix.exs.bump.bak mix.exs`, { timeout: 5000 });
-    bridge.ui.toast('Failed to edit mix.exs', 'error');
-    render();
-    return;
+  await bridge.shell.run('rm -f mix.exs.bump.bak', { timeout: 5000 });
+  if (out.verifyError) {
+    bridge.ui.toast(`Bumped ${name}, but could not verify: ${out.verifyError}`, 'error');
+  } else if (movedIt) {
+    bridge.ui.toast(
+      out.result.code !== 0
+        ? `${name} bumped to ${newConstraint} and updated, but mix exited with an error`
+        : `${name} bumped to ${newConstraint} and updated`,
+      out.result.code !== 0 ? 'error' : 'success',
+    );
+  } else {
+    bridge.ui.toast(`${name} constraint bumped, but the version did not move`, 'info');
   }
-
-  // Run mix deps.update
-  const updateResult = await bridge.shell.run(`mix deps.update ${shellQuote(name)}`, { timeout: 120000 });
-
-  if (updateResult.code !== 0) {
-    await bridge.shell.run(`mv mix.exs.bump.bak mix.exs`, { timeout: 5000 });
-    const msg = ((updateResult.stderr || '') + (updateResult.stdout || '') || 'deps.update failed').trim();
-    const shortMsg = msg.split('\n').filter(l => l.includes('dependency') || l.includes('requirement') || l.includes('constraint') || l.startsWith('**')).slice(0, 3).join('\n') || msg.slice(0, 200);
-    setContent(`<div class="error-box">Bump reverted — constraint conflict:\n\n${htmlEscape(shortMsg)}</div>`);
-    bridge.ui.toast(`${name} bump reverted`, 'error');
-    setTimeout(() => render(), 5000);
-    return;
-  }
-
-  await bridge.shell.run(`rm -f mix.exs.bump.bak`, { timeout: 5000 });
-
-  selectedReview = null;
-  await refreshData();
-  render();
-  bridge.ui.toast(`${name} bumped to ${newConstraint} and updated`, 'success');
 }
 
 // Update only patch + minor releases — skips major bumps that may break.
@@ -2049,31 +2485,16 @@ async function updateSafe() {
     return;
   }
   const names = safe.map(d => d.name);
-  selectedReview = null;
   const { cmd } = buildUpdateCommand(names);
-  let result;
-  try {
-    result = await runWithProgress(
-      cmd,
-      `Updating ${names.length} safe package${names.length > 1 ? 's' : ''} (patch + minor)…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
+  const out = await runTask({
+    targets: names,
+    cmd,
+    label: `Updating ${names.length} safe package${names.length > 1 ? 's' : ''} (patch + minor)`,
+  });
+  if (out) {
+    summariseTask(out.rec, out.verifyError);
+    runSecurityAndHousekeeping();
   }
-  if (result.timed_out) { bridge.ui.toast('Update timed out', 'error'); render(); return; }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Safe update failed:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast('Safe update failed', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  runSecurityAndHousekeeping();
-  bridge.ui.toast('Patch + minor updates applied', 'success');
 }
 
 // Split names into direct deps (declared in mix.exs) and transitive ones
@@ -2105,44 +2526,26 @@ async function updateVulnerable() {
   if (loading) return;
   const names = Object.keys(vulnMap);
   if (!names.length) return;
-  selectedReview = null;
-
   const { cmd, transitive } = buildUpdateCommand(names);
-  const note = transitive.length
-    ? ` (${transitive.length} transitive — unlocking & re-resolving)`
-    : '';
-
-  let result;
-  try {
-    result = await runWithProgress(
-      cmd,
-      `Updating ${names.length} vulnerable package${names.length > 1 ? 's' : ''}${note}…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
+  const note = transitive.length ? ` (${transitive.length} transitive)` : '';
+  const out = await runTask({
+    targets: names,
+    cmd,
+    label: `Updating ${names.length} vulnerable package${names.length > 1 ? 's' : ''}${note}`,
+  });
+  if (out) {
+    summariseTask(out.rec, out.verifyError);
+    // Re-audit: a transitive dep pinned by its parent may still be vulnerable.
+    runSecurityAndHousekeeping();
   }
-  if (result.timed_out) { bridge.ui.toast('Update timed out', 'error'); render(); return; }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Vulnerability update failed:\n\n${htmlEscape(msg)}</div>`);
-    bridge.ui.toast('Update failed — a constraint may pin the vulnerable version', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  runSecurityAndHousekeeping();
-  // The re-audit confirms whether the patched version was actually reachable;
-  // a transitive dep pinned by its parent may still show after unlock.
-  bridge.ui.toast('Updated — re-auditing to confirm', 'success');
 }
 
-// Remove unused entries from mix.lock.
+// Remove unused entries from mix.lock. Fast enough not to need progress UI,
+// but it changes the lock — so the view must be re-read, not just re-rendered.
 async function pruneUnused() {
   if (loading || !unusedDeps.length) return;
   const names = unusedDeps.slice();
+
   let result;
   try {
     result = await bridge.shell.run(`mix deps.unlock ${names.map(shellQuote).join(' ')}`, { timeout: 30000 });
@@ -2154,9 +2557,18 @@ async function pruneUnused() {
     bridge.ui.toast('Failed to prune lock', 'error');
     return;
   }
+
   unusedDeps = [];
   lockCache = null;
+  try {
+    await refreshData();
+  } catch (e) {
+    bridge.ui.toast(`Pruned, but could not verify: ${e.message}`, 'error');
+    render();
+    return;
+  }
   render();
+  runSecurityAndHousekeeping();
   bridge.ui.toast(`Pruned ${names.length} unused dep${names.length > 1 ? 's' : ''} from mix.lock`, 'success');
 }
 
@@ -2164,48 +2576,20 @@ async function updateAll() {
   if (loading) return;
   const outdated = deps.filter(d => d.outdated);
   if (!outdated.length) return;
-  const unreviewedMajor = outdated.find(d => updateType(d.current, d.latest) === 'major' && !reviewedDeps.has(d.name));
+  const unreviewedMajor = outdated.find(d =>
+    updateType(d.current, d.latest) === 'major' && !reviewedDeps.has(d.name));
   if (unreviewedMajor) {
     await showPackageReview(unreviewedMajor.name);
     bridge.ui.toast(`${unreviewedMajor.name} is a major update. Review it before updating all.`, 'info');
     return;
   }
-  const prevCount = outdated.length;
-
-  let result;
-  try {
-    result = await runWithProgress(
-      'mix deps.update --all && mix deps.get',
-      `Updating ${outdated.length} package${outdated.length > 1 ? 's' : ''}…`
-    );
-  } catch (e) {
-    bridge.ui.toast(`Error: ${e}`, 'error');
-    render();
-    return;
-  }
-  if (result.timed_out) {
-    bridge.ui.toast('Update timed out', 'error');
-    render();
-    return;
-  }
-  if (result.code !== 0) {
-    const msg = ((result.stderr || '') + (result.stdout || '') || 'mix deps.update failed').trim();
-    setContent(`<div class="error-box">Update failed:\n\n${msg}</div>`);
-    bridge.ui.toast('Update failed', 'error');
-    setTimeout(() => render(), 4000);
-    return;
-  }
-  await refreshData();
-  render();
-  const nowOutdated = deps.filter(d => d.outdated).length;
-  const updated = prevCount - nowOutdated;
-  if (updated === 0) {
-    bridge.ui.toast('No packages updated (constraint conflicts)', 'info');
-  } else if (nowOutdated === 0) {
-    bridge.ui.toast('All packages updated', 'success');
-  } else {
-    bridge.ui.toast(`${updated} of ${prevCount} packages updated`, 'success');
-  }
+  const names = outdated.map(d => d.name);
+  const out = await runTask({
+    targets: names,
+    cmd: 'mix deps.update --all && mix deps.get',
+    label: `Updating ${names.length} package${names.length > 1 ? 's' : ''}`,
+  });
+  if (out) summariseTask(out.rec, out.verifyError);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
