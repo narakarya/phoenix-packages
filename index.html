@@ -903,6 +903,53 @@ function parseMixLock(content) {
   return lock;
 }
 
+// Pure. `before`/`after` map package name → version. Reality — the version
+// diff — overrides whatever the stream parser inferred, because mix's output
+// format is not a stable contract and its exit code says nothing about which
+// individual packages moved.
+function reconcileVersions(before, after, status) {
+  const names = new Set([
+    ...Object.keys(status || {}),
+    ...Object.keys(after || {}),
+    ...Object.keys(before || {}),
+  ]);
+  const moved = [], unchanged = [], added = [], removed = [], mismatches = [];
+
+  for (const name of names) {
+    const b = before[name];
+    const a = after[name];
+
+    if (b && a && b !== a) moved.push({ name, from: b, to: a });
+    else if (a && !b) added.push({ name, to: a });
+    else if (b && !a) removed.push({ name, from: b });
+    else if (b && a) unchanged.push(name);
+
+    const claimed = status?.[name]?.state;
+    const didMove = !!(b && a && b !== a);
+    if ((claimed === 'upgraded' || claimed === 'downgraded') && !didMove) {
+      mismatches.push({ name, claimed, actual: a || null });
+    }
+  }
+
+  return { moved, unchanged, added, removed, mismatches };
+}
+
+// Rewrite per-package state to match the version diff, and record every place
+// the parser and reality disagreed.
+function applyReconciliation(st, rec, log) {
+  if (!rec) return;
+  for (const m of rec.moved) {
+    const e = ensureEntry(st, m.name);
+    e.state = 'upgraded';
+    e.from = m.from;
+    e.to = m.to;
+  }
+  for (const mm of rec.mismatches) {
+    ensureEntry(st, mm.name).state = 'unchanged';
+    log.push(`[porta] ${mm.name}: mix reported ${mm.claimed} but the version did not move — showing unchanged`);
+  }
+}
+
 // ── Security audit + housekeeping ───────────────────────────────────────────────
 
 // `mix hex.audit` lists locked packages the maintainer has *retired* (pulled

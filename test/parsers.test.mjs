@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPureFns } from './harness.mjs';
 
-const { newTaskStatus, parseResolutionLine } = loadPureFns([
+const { newTaskStatus, parseResolutionLine, reconcileVersions } = loadPureFns([
   'newTaskStatus',
   'parseResolutionLine',
+  'reconcileVersions',
 ]);
 
 const feed = (st, text) => {
@@ -63,4 +64,34 @@ test('mix error lines are captured and mark the task failed', () => {
   feed(st, '** (Mix) Dependency resolution failed');
   assert.equal(st.phase, 'failed');
   assert.equal(st.errorLines.length, 1);
+});
+
+test('moved packages are detected from the version diff', () => {
+  const rec = reconcileVersions(
+    { phoenix: '1.7.10', castore: '1.0.8' },
+    { phoenix: '1.7.14', castore: '1.0.8' },
+    {},
+  );
+  assert.deepEqual(rec.moved, [{ name: 'phoenix', from: '1.7.10', to: '1.7.14' }]);
+  assert.deepEqual(rec.unchanged, ['castore']);
+});
+
+test('reality overrides a parser that claimed an upgrade that did not happen', () => {
+  const st = newTaskStatus(['phoenix']);
+  st.status.phoenix = { state: 'upgraded', from: '1.7.10', to: '1.7.14', extra: false };
+
+  const rec = reconcileVersions({ phoenix: '1.7.10' }, { phoenix: '1.7.10' }, st.status);
+
+  assert.deepEqual(rec.moved, []);
+  assert.deepEqual(rec.mismatches, [{ name: 'phoenix', claimed: 'upgraded', actual: '1.7.10' }]);
+});
+
+test('packages appearing only after the run are reported as added', () => {
+  const rec = reconcileVersions({}, { telemetry: '1.2.1' }, {});
+  assert.deepEqual(rec.added, [{ name: 'telemetry', to: '1.2.1' }]);
+});
+
+test('packages gone after the run are reported as removed', () => {
+  const rec = reconcileVersions({ old_dep: '0.1.0' }, {}, { old_dep: { state: 'removed' } });
+  assert.deepEqual(rec.removed, [{ name: 'old_dep', from: '0.1.0' }]);
 });
