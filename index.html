@@ -583,6 +583,32 @@ button.info-btn {
 .task-status.queued { color: var(--text-muted); }
 tr.dep-row.dimmed { opacity: 0.35; }
 #task-counter { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+.log-panel {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.22);
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.log-body {
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px;
+  font-family: monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.log-panel.collapsed .log-body { display: none; }
+.log-panel.collapsed .log-head { border-bottom: none; }
+.log-line { color: var(--text-dim); }
+.log-line.log-error { color: var(--red); }
 </style>
 </head>
 <body>
@@ -2006,6 +2032,50 @@ function paintTask() {
   }
 }
 
+function firstLogErrorIndex() {
+  if (!task) return -1;
+  return task.log.findIndex(l => l.trim().startsWith('** '));
+}
+
+function renderLogPanel() {
+  if (!task || !task.log.length) return '';
+  const errIdx = firstLogErrorIndex();
+  const body = task.log
+    .map((l, i) => `<div class="log-line${i === errIdx ? ' log-error' : ''}" id="log-line-${i}">${htmlEscape(l)}</div>`)
+    .join('');
+  const verify = task.verifyError
+    ? `<span class="task-status err">could not verify: ${htmlEscape(task.verifyError)}</span>`
+    : '';
+  return `<div class="log-panel${task.logOpen ? '' : ' collapsed'}" id="log-panel">
+    <div class="log-head">
+      <button onclick="toggleTaskLog()">${task.logOpen ? 'Hide' : 'Show'} output (${task.log.length} lines)</button>
+      <button onclick="copyTaskLog()">Copy</button>
+      ${verify}
+    </div>
+    <div class="log-body">${body}</div>
+  </div>`;
+}
+
+function toggleTaskLog() {
+  if (!task) return;
+  task.logOpen = !task.logOpen;
+  render();
+  if (task.logOpen) scrollToFirstLogError();
+}
+
+function copyTaskLog() {
+  if (!task) return;
+  navigator.clipboard.writeText(task.log.join('\n'))
+    .then(() => bridge.ui.toast('Output copied to clipboard', 'success'))
+    .catch(() => {});
+}
+
+function scrollToFirstLogError() {
+  const idx = firstLogErrorIndex();
+  if (idx < 0) return;
+  document.getElementById('log-line-' + idx)?.scrollIntoView({ block: 'center' });
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function renderBanners() {
@@ -2130,7 +2200,9 @@ function render() {
   }
 
   html += `</tbody></table>`;
+  html += renderLogPanel();
   document.getElementById('content').innerHTML = html;
+  if (task?.logOpen) scrollToFirstLogError();
 }
 
 function esc(s) {
