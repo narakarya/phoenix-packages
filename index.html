@@ -2059,8 +2059,15 @@ function renderLogPanel() {
 function toggleTaskLog() {
   if (!task) return;
   task.logOpen = !task.logOpen;
-  render();
-  if (task.logOpen) scrollToFirstLogError();
+  const panel = document.getElementById('log-panel');
+  if (!panel) { render(); return; }
+  panel.classList.toggle('collapsed', !task.logOpen);
+  const btn = panel.querySelector('.log-head button');
+  if (btn) btn.textContent = `${task.logOpen ? 'Hide' : 'Show'} output (${task.log.length} lines)`;
+  if (task.logOpen) {
+    task.logScrolled = false;
+    scrollToFirstLogError();
+  }
 }
 
 function copyTaskLog() {
@@ -2070,10 +2077,21 @@ function copyTaskLog() {
     .catch(() => {});
 }
 
+// Scroll the log body to the failure. Mix does not always print a `** ` line —
+// a resolution conflict or a network error just ends — so with no marker the
+// tail is where the failure text is. Scroll the panel, not the page: mirrors
+// scrollToFile()'s offsetTop arithmetic rather than scrollIntoView, which would
+// drag #content along with it.
 function scrollToFirstLogError() {
+  if (!task || !task.log.length) return;
   const idx = firstLogErrorIndex();
-  if (idx < 0) return;
-  document.getElementById('log-line-' + idx)?.scrollIntoView({ block: 'center' });
+  const target = idx >= 0 ? idx : task.log.length - 1;
+  const el = document.getElementById('log-line-' + target);
+  const body = document.querySelector('.log-body');
+  if (el && body) {
+    body.scrollTop = Math.max(0, el.offsetTop - body.offsetTop - body.clientHeight / 2);
+  }
+  task.logScrolled = true;
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -2202,7 +2220,9 @@ function render() {
   html += `</tbody></table>`;
   html += renderLogPanel();
   document.getElementById('content').innerHTML = html;
-  if (task?.logOpen) scrollToFirstLogError();
+  // Only on the render that first reveals the panel — later renders (a review
+  // panel opening, a changelog toggling) must not yank the user's scroll back.
+  if (task?.logOpen && !task.logScrolled) scrollToFirstLogError();
 }
 
 function esc(s) {
