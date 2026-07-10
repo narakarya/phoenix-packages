@@ -886,6 +886,16 @@ function parseResolutionLine(line, st) {
     if (m) {
       const [, name, v1, v2] = m;
       const e = ensureEntry(st, name);
+
+      // A command like `mix deps.update foo && mix deps.get` streams two
+      // resolution blocks. The second re-resolves against the lock the first
+      // just wrote, so it lists foo under `Unchanged:` at its new version —
+      // true for deps.get, false for the run. Never let `Unchanged:` erase a
+      // move an earlier block in this same run already reported.
+      if (st.section === 'unchanged' && e.from && e.to && e.from !== e.to) {
+        return st;
+      }
+
       e.state = st.section;
       if (v2) {
         e.from = v1;
