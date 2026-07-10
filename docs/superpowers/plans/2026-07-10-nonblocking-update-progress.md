@@ -17,6 +17,7 @@
 - Reconciliation MUST run even when the command exits non-zero or times out; mix may have written `mix.lock` before failing.
 - All pure functions under test MUST live between the `// ── Parsers` and `// ── Security audit` markers in `index.html`. That block is currently function declarations only, with no top-level side effects. Keep it that way.
 - Never run `mix deps.update` against one of the user's real projects to capture fixtures — it mutates `mix.lock`.
+- The test command is `node --test test/*.test.mjs`. Do NOT use `node --test test/` — on Node 25 a directory argument is treated as an entry module and the run dies with MODULE_NOT_FOUND. Bare `node --test` works but also runs `harness.mjs` as an empty test file.
 
 ---
 
@@ -138,7 +139,7 @@ test('mix error lines are captured and mark the task failed', () => {
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: FAIL — `parser block markers not found` is wrong; you should instead see failures from `new Function` returning `undefined` for `newTaskStatus`, e.g. `TypeError: newTaskStatus is not a function`.
 
 - [ ] **Step 4: Implement the parser**
@@ -235,7 +236,7 @@ function parseResolutionLine(line, st) {
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 5 tests.
 
 - [ ] **Step 6: Commit**
@@ -298,7 +299,7 @@ test('packages gone after the run are reported as removed', () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: FAIL with `TypeError: reconcileVersions is not a function`.
 
 - [ ] **Step 3: Implement reconcileVersions**
@@ -356,7 +357,7 @@ function applyReconciliation(st, rec, log) {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 9 tests.
 
 - [ ] **Step 5: Commit**
@@ -457,7 +458,7 @@ test('retired and vulnerability flags survive the rebuild', () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: FAIL, 4 new tests, each with `TypeError: buildDepsFromResults is not a function`.
 
 - [ ] **Step 3: Implement the pure core**
@@ -489,7 +490,7 @@ function buildDepsFromResults(outdatedResult, mixExsContent, { retiredMap, vulnM
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Rewrite refreshData as a thin I/O shell**
@@ -542,7 +543,7 @@ Expected: six call sites (`updateDep`, `updateTogether`, `bumpDep`, `updateSafe`
 
 - [ ] **Step 7: Run tests**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 13 tests.
 
 - [ ] **Step 8: Commit**
@@ -690,7 +691,7 @@ Finally, hide the counter when no task is active. At the top of `render()`, afte
 
 There is no DOM test. In Porta, open the extension on a Phoenix app with outdated deps. Nothing should look different yet — `task` is always `null` until Task 6 wires it up. Confirm the table renders exactly as before and no console errors appear.
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 13 tests (no regressions).
 
 - [ ] **Step 6: Commit**
@@ -820,7 +821,7 @@ Replace with:
 
 - [ ] **Step 4: Verify**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 13 tests. The panel is still unreachable (`task` stays `null`); Task 6 wires it.
 
 - [ ] **Step 5: Commit**
@@ -1113,7 +1114,7 @@ Expected: no output.
 Run: `grep -n "prevCount\|nowOutdated" index.html`
 Expected: no output.
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 13 tests.
 
 - [ ] **Step 7: Manual verification in Porta**
@@ -1194,7 +1195,7 @@ Append a section:
 
 Parser and reconciliation logic is unit-tested:
 
-    node --test test/
+    node --test test/*.test.mjs
 
 The DOM is not. After touching the update flow, check by hand in Porta against
 a Phoenix app with at least two outdated deps:
@@ -1216,7 +1217,7 @@ When you next run a real update, save its output into a fixture — do not run
 
 - [ ] **Step 3: Run tests**
 
-Run: `node --test test/`
+Run: `node --test test/*.test.mjs`
 Expected: PASS, 13 tests.
 
 - [ ] **Step 4: Commit**
