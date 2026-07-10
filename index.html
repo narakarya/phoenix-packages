@@ -2090,8 +2090,29 @@ function scrollToFirstLogError() {
   const body = document.querySelector('.log-body');
   if (el && body) {
     body.scrollTop = Math.max(0, el.offsetTop - body.offsetTop - body.clientHeight / 2);
+    task.logScrollTop = body.scrollTop;
   }
   task.logScrolled = true;
+}
+
+// render() rebuilds #content wholesale, so a rebuilt .log-body starts at
+// scrollTop 0. Put the user back where they were — or, the first time the panel
+// opens, at the failure.
+function restoreLogScroll() {
+  if (!task) return;
+  if (!task.logScrolled) { scrollToFirstLogError(); return; }
+  const body = document.querySelector('.log-body');
+  if (body) body.scrollTop = task.logScrollTop || 0;
+}
+
+// Remember where the user left the log. The .log-body node is recreated on every
+// render(), so this re-attaches each time rather than leaking listeners.
+function trackLogScroll() {
+  const body = document.querySelector('.log-body');
+  if (!body) return;
+  body.addEventListener('scroll', () => {
+    if (task) task.logScrollTop = body.scrollTop;
+  }, { passive: true });
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -2220,9 +2241,10 @@ function render() {
   html += `</tbody></table>`;
   html += renderLogPanel();
   document.getElementById('content').innerHTML = html;
-  // Only on the render that first reveals the panel — later renders (a review
-  // panel opening, a changelog toggling) must not yank the user's scroll back.
-  if (task?.logOpen && !task.logScrolled) scrollToFirstLogError();
+  if (task && task.log.length) {
+    trackLogScroll();
+    if (task.logOpen) restoreLogScroll();
+  }
 }
 
 function esc(s) {
