@@ -147,10 +147,12 @@ button.primary:hover { background: rgba(167,139,250,0.22); }
   font-size: 10px;
   font-weight: 500;
 }
-.badge-ok      { background: rgba(52,211,153,0.12);  color: var(--green);  }
-.badge-minor   { background: rgba(96,165,250,0.12);  color: var(--blue);   }
-.badge-major   { background: rgba(251,191,36,0.12);  color: var(--yellow); }
-.badge-patch   { background: rgba(167,139,250,0.12); color: var(--violet); }
+/* Severity risk-ramp: patch=green (safe) → minor=yellow → major=red (risky).
+   "up to date" is neutral — it's a done-state, not a severity level. */
+.badge-ok      { background: rgba(255,255,255,0.06); color: var(--text-muted); }
+.badge-minor   { background: rgba(251,191,36,0.12);  color: var(--yellow); }
+.badge-major   { background: rgba(248,113,113,0.12); color: var(--red);    }
+.badge-patch   { background: rgba(52,211,153,0.12);  color: var(--green);  }
 .badge-blocked { background: rgba(251,146,60,0.12);  color: var(--amber);  }
 .badge-retired { background: rgba(248,113,113,0.14); color: var(--red);    }
 .badge-vuln    { background: rgba(248,113,113,0.18); color: var(--red); font-weight: 600; }
@@ -283,9 +285,9 @@ td {
 .ver-current { color: var(--text-dim); }
 .ver-same { color: var(--text-muted); }
 .ver-prefix { opacity: 0.4; }
-.ver-changed-major { color: var(--yellow); font-weight: 600; }
-.ver-changed-minor { color: var(--blue);   font-weight: 600; }
-.ver-changed-patch { color: var(--violet); font-weight: 600; }
+.ver-changed-major { color: var(--red);    font-weight: 600; }
+.ver-changed-minor { color: var(--yellow); font-weight: 600; }
+.ver-changed-patch { color: var(--green);  font-weight: 600; }
 
 /* Constraint column */
 .constraint-tag {
