@@ -1,7 +1,7 @@
 {
   "id": "phoenix-packages",
   "name": "Phoenix Package Manager",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "View, update, audit, and diagnose Mix dependency conflicts for Phoenix/Elixir apps",
   "author": "Porta",
   "activateOn": ["app:kind:phoenix", "app:kind:elixir"],
